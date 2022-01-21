@@ -92,7 +92,7 @@ There are a few plausible reasons why timeout usage is decreasing over time. Whe
 
 To get a better idea of precisely when NHL coaches tend to use their timeouts, the histograms below display the distribution of called timeouts by seconds elapsed and by score differential from the perspective of the team taking its timeout, broken down by season.
 
-```{r timeout histograms, echo = FALSE, fig.hold = 'hold', out.width = "50%"}
+```{r timeout histograms, echo = FALSE, fig.hold = 'hold', out.width = "50%", fig.align = "default"}
 ggplot(timeouts, aes(x = game_seconds, y = ..density..)) +
     geom_histogram(breaks = seq(0, 3900, 60),
                    fill = "indianred1") +
@@ -578,7 +578,7 @@ To further visualize the effect of each time-dependent covariate, note that ther
 
 The two plots below display the survival curves for the four timeout situations, with one plot representing the goalie not being pulled and the other representing the goalie being pulled. The confidence intervals and censor ticks are not shown to make the plot easier to read; however, note that within the four timeout states, the curves are not significantly different from each other, while all curves where the goalie is pulled are significantly different from all curves where the goalie is not pulled.
 
-```{r all tdc curves, echo = FALSE, message = FALSE, fig.hold = 'hold', out.width = "50%"}
+```{r all tdc curves, echo = FALSE, message = FALSE, fig.hold = 'hold', out.width = "50%", fig.align = "default"}
 cox_fit_all <- survfit(formula = coxph(Surv(time = tstart, time2 = tstop, event = tied) ~ to_trail + to_lead + g_pull,
                                        data = td_data_all),
                        newdata = data.frame(to_trail = c(0, 1, 0, 1),
@@ -654,7 +654,7 @@ Finally, we record the number of shots attempted by the trailing team in each of
 
 Below we display the distribution of Corsi and Fenwick shot attempts by the trailing team in both games where no timeout is used and in games where the trailing team uses a timeout.
 
-```{r corsi fenwick histograms, echo = FALSE, fig.hold = 'hold', out.width = "50%"}
+```{r corsi fenwick histograms, echo = FALSE, fig.hold = 'hold', out.width = "50%", fig.align = "default"}
 sae_train <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/All Timeouts/sae_train.csv")
 sae_test <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/All Timeouts/sae_test.csv")
 
