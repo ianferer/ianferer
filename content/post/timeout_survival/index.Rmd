@@ -8,7 +8,7 @@ output:
 ---
 
 ```{r setup, include = FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, fig.path = "static")
 
 library(RCurl)
 library(xml2)
@@ -92,7 +92,7 @@ There are a few plausible reasons why timeout usage is decreasing over time. Whe
 
 To get a better idea of precisely when NHL coaches tend to use their timeouts, the histograms below display the distribution of called timeouts by seconds elapsed and by score differential from the perspective of the team taking its timeout, broken down by season.
 
-```{r timeout histograms, echo = FALSE, fig.hold = 'hold'}
+```{r timeout histograms, echo = FALSE}
 ggplot(timeouts, aes(x = game_seconds, y = ..density..)) +
     geom_histogram(breaks = seq(0, 3900, 60),
                    fill = "indianred1") +
