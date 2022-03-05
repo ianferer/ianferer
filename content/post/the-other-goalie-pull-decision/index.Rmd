@@ -1,0 +1,660 @@
+---
+title: "The Other Goalie Pull Decision"
+author: "Ian Ferer"
+date: "2022-03-05"
+output:
+    html_document: default
+    pdf_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, fig.path = "static")
+
+library(RCurl)
+library(xml2)
+library(rvest)
+library(jsonlite)
+library(foreach)
+library(lubridate)
+library(teamcolors)
+library(survival)
+library(survminer)
+library(knitr)
+library(gtsummary)
+library(kableExtra)
+library(MASS)
+library(fitdistrplus)
+library(pscl)
+library(lmtest)
+library(pROC)
+library(MLmetrics)
+library(gganimate)
+library(transformr)
+library(gifski)
+library(ggrepel)
+library(tidyverse)
+```
+
+## Introduction
+
+You just remembered that your favorite hockey team is playing tonight. You turn on the game during the first intermission to find that your team's starting goalie has given up 3 goals on only 8 shots, putting them in a 3-0 hole after the first period. If you were the coach, what would you do? Would you leave the starter in net, or would you put in the backup goalie? You know that the starter is the better goalie on paper, but everyone has bad games now and then -- is tonight one of those games? How confident are you in your answer? Even if the starter is having an off night, does the backup really give you a better chance to win? If so, how much better? Is the game already out of reach anyway? Answering these questions is important, but maybe the most important question is this: how exactly do you plan to answer them? 
+
+This is the main goal of this project -- we want to develop a systematic approach to answering all of these questions about our starting goalie. How can we model a hockey game to appropriately capture all of the uncertainty that exists when trying to judge a goalie's performance within a single game, *especially* when we want to make this judgment while the game is still in progress? Additionally, when creating this model, we need to consider what information we need to make a decision, and whether or not we can obtain it in real time. Then, how do we devise a decision rule? That is, given the model and the necessary inputs to the model, how do we interpret and use the model output to make a binary decision (leave in the starter or put in the backup)?
+
+This article will focus primarily on creating a *theoretical* model of a hockey game that allows us to make inferences about a goalie's performance within a single game -- while that game is in progress -- by accounting for all the uncertainty that goes into judging a goaltender on fewer than 60 minutes worth of goaltending. For this reason, this article will involve more probability theory than application, but the basic statistical theory and modeling ideas discussed here will serve as the foundation for all future parts of this project.
+
+## Data & Modeling Assumptions
+
+Because we want to make decisions about goalies in real time, it is important to make sure that our model is dependent only on data we can obtain in real time. While it would be much better to use statistics like expected goals to make judgments about our goalie's performance, we may not always be able to obtain accurate numbers quickly enough to make an immediate decision. Therefore, while we know that not all shots are identical, for the purposes of making quick decisions, we will assume that all shots on goal have an equal probability of becoming goals, and that all shots on goal are independent of each other (this is also clearly not true, but we are trying to create a simple, tractable model, not a perfect model). It is not difficult to record counts of both goals against and shots on goal against as they occur, so we will consider these two statistics when attempting to evaluate goalies in real time. Restricting our statistics to only goals allowed and shots on goal faced also allows this model to be extended to other leagues where expected goals are not fully developed, such as professional women's leagues, junior and college leagues, and international play.
+
+Then, given our assumptions and the data that we have available for this particular problem, there is a natural method of evaluating goalie performance. If we assume that each shot a goalie faces has an independent and equal probability of resulting in a goal, then we can evaluate goalies by what we believe this goal probability to be. That is, for a particular game, we will assume that a goalie will save each shot they face with a fixed probability $\theta \in [0, 1]$, and that the value of $\theta$ is dependent only on the goalie. All decisions will therefore be based (at least in part) on our beliefs about $\theta$. Note that we assume $\theta$ to be fixed for a particular game, but it is not assumed to be fixed from game to game (if it were fixed from game to game, this problem would be far less interesting). Note also that this differs from our usual understanding of save percentage: instead of $\theta$ simply representing the proportion of shots saved by the goalie over the course of the game, here we are treating $\theta$ as a parameter representing the true probability that a goalie saves each given shot they face. For this reason, we will refer to $\theta$ as a goalie's *save probability*.
+
+In summary, we are making the following assumptions about a hockey game:
+
+* Every shot a goalie faces will be saved with probability $\theta$, and will result in a goal with probability $1 - \theta$.
+* These shots on goal are independent of each other.
+* The value of $\theta$ is entirely dependent on the goalie facing these shots, and $\theta$ is fixed for the goalie for a given game, but is not necessarily fixed from game to game.
+
+Under these assumptions, we can model the process of a goalie facing shots on goal as a sequence of Bernoulli trials, where each trial has success probability $1 - \theta$, with success defined to be a shot resulting in a goal. Then, given the number of shots faced $n$ and the goalie's save probability $\theta$, the number of goals allowed by the goalie $X$ follows a binomial distribution with $n$ trials and success probability $1 - \theta$. That is, the probability of a goalie allowing exactly $x$ goals on $n$ shots, for $x \in \left\{ 0, \dots, n \right\}$, is given by
+
+\[ \Pr \left( X = x \mid \theta \right) = \binom{n}{x} \left( 1 - \theta \right)^{x} \theta^{n - x} \]
+
+If we knew the value of $\theta$ for both our starting goalie and our backup goalie for a given game, then we would know which goalie would give us the better chance to win, and this problem would already be solved. Therefore, we will take $\theta$ to be unknown, and we will need to perform some sort of statistical inference about the value of $\theta$ in order to represent the reality of our decision-making process. While there are several ways to do this, it will be most helpful to think about $\theta$ in a Bayesian context.
+
+## Bayesian Inference
+
+**Note: it is not necessary to have a deep understanding of Bayes' theorem for this project, but if you are unfamiliar with Bayes' theorem and/or would like to better understand what it means, it may be helpful to watch some or all of the following videos from [3Blue1Brown](<https://www.3blue1brown.com/about>), as Grant does an excellent job explaining the intuition behind much of the probability theory employed here. Each video is around 10-15 minutes long, but they are well worth the time if you are new to Bayesian inference and would like to understand more about the math being done here:**
+
+1. **[Bayes' theorem](<https://youtu.be/HZGCoVF3YvM>)**
+2. **[Probabilities of probabilities, part 1](<https://youtu.be/8idr1WZ1A7Q>)**
+3. **[Probabilities of probabilities, part 2](<https://youtu.be/ZA4JkHKZM50>)**
+
+To understand $\theta$ in the spirit of Bayesian inference, we assume a *prior distribution* $\pi \left( \cdot \right)$ on $\theta$ that represents our prior beliefs about how $\theta$ behaves. That is, we treat $\theta$ as a random quantity that is realized for each game (and is thus fixed for each game, but not from game to game), and $\pi \left( \cdot \right)$ represents the probability density according to which $\theta$ takes values. To make the inference process easier, we will assume for now that $\theta$ follows a beta distribution, which is the *conjugate prior distribution* for the binomial distribution (for the purposes of this project, all that this means is that the beta distribution makes all calculations easier when performing Bayesian inference on a probability parameter). The beta distribution is defined for $\theta \in [0, 1]$ (which is why it works well as a prior distribution for probability parameters) and is characterized by two shape parameters $\alpha > 0$ and $\beta > 0$, and has probability density given by
+
+\[ f \left( \theta \mid \alpha, \beta \right) = \frac{\theta^{\alpha - 1} \left( 1 - \theta \right)^{\beta - 1}}{\text{B} \left( \alpha, \beta \right)} \]
+
+where $\text{B}$ is the beta function, which serves as a normalizing constant to ensure $f$ is a valid probability density. From this density, we can also find that if $\theta \sim \text{Beta} \left( \alpha, \beta \right)$, then the expected value of $\theta$ is given by
+
+\[ \mathbb{E} \left( \theta \right) = \frac{\alpha}{\alpha + \beta} \]
+
+For Bayesian inference, we can choose $\alpha$ and $\beta$ however we want in order to reflect our original beliefs about $\theta$ (we will explore some ways to choose a prior later). As an example, if we have no prior beliefs about $\theta$, then we may want to assume that it is uniformly distributed on the interval $[0, 1]$, in which case we can choose $\alpha = \beta = 1$, which gives a beta distribution with mean $\mathbb{E} \left( \theta \right) = 0.50$.
+
+In the context of our situation where $\theta$ represents a save probability, it will be helpful to think of $\alpha$ and $\beta$ in terms of a goalie facing shots on goal. Essentially, when we choose $\alpha$ and $\beta$, we are assuming that we have *already watched* the goalie save $\alpha$ shots and allow $\beta$ goals on a total of $\alpha + \beta$ shots, before the game begins ($\alpha$ and $\beta$ do not have to be integers, but when thinking about what they mean it will be helpful to think of them as integers). Therefore, if we choose smaller values of $\alpha$ and $\beta$, we will be more uncertain about $\theta$, as we are assuming less information, but then each shot we *actually* observe will contribute more to our beliefs about $\theta$ in the current game. On the other hand, if we assume larger values of $\alpha$ and $\beta$, we will be more certain about $\theta$ before the game, and each shot we observe will contribute less to our beliefs about $\theta$ in the current game. Furthermore, this should give some more context to the expected value of the beta distribution. For example, if we choose $\alpha = 10$ and $\beta = 1$, then we are assuming that we've seen the goalie make 10 saves on 11 shots, for an observed save percentage of $10/11 \approx 0.9091$ -- this is exactly the mean of our prior distribution.
+
+For now, assume that we have chosen $\alpha$ and $\beta$ to represent our prior beliefs. We can then summarize our model so far as follows:
+
+* Given the true value of $\theta \in [0, 1]$, the number of goals allowed $X$ on $n$ shots on goal (assuming $n$ is known) is distributed according to $X \mid \theta \sim \text{Binomial} \left( n, 1 - \theta \right)$
+* The goalie's save probability $\theta$ is distributed according to $\theta \sim \text{Beta} \left( \alpha, \beta \right)$
+
+In order to make inferences about $\theta$ as the game progresses, we can observe successive values of $X$ with known $n$, and then we can update our prior distribution $\pi \left( \cdot \right)$ in light of these values of $X$ using Bayes' theorem:
+
+\[ \pi \left( \theta \mid x \right) = \frac{\Pr \left( X = x \mid \theta \right) \pi \left( \theta \right)}{\int_{\Theta} \Pr \left( X = x \mid \theta \right) \pi \left( \theta \right) \ d \theta} \]
+
+In this formula:
+
+* $\pi \left( \theta \mid x \right)$ is the *posterior density* of $\theta$ given an observed value of $X = x$
+* $\Pr \left( X = x \mid \theta \right)$ is the probability of allowing $X = x$ goals on $n$ shots, given the values of $n$ and $\theta$
+* $\pi \left( \theta \right)$ is the prior density of $\theta$
+* $\Theta = [0, 1]$ is the set of all possible values of $\theta$
+
+Without going into the details of the computation, we can find that the posterior density of $\theta$ given $x$ is given by
+
+\[ \pi \left( \theta \mid x \right) = \frac{\theta^{\alpha + n - x - 1} \left( 1 - \theta \right)^{\beta + x - 1}}{\text{B} \left( \alpha + n - x, \beta + x \right)} \]
+
+Note that this is exactly the probability density of a $\text{Beta} \left( \alpha + n - x, \beta + x \right)$ distribution, which means that
+
+\[ \theta \mid X = x \sim \text{Beta} \left( \alpha + n - x, \beta + x \right) \]
+
+In practice, this simply means that we add the number of saves on $n$ shots to our prior choice of $\alpha$ and we add the number of goals allowed on $n$ shots to our prior choice of $\beta$ to get our posterior distribution, which is also a beta distribution.
+
+To get an idea of what it actually means to update our beliefs after each successive shot on goal, suppose that for a given hockey game, the starting goalie's true save probability is $\theta = 0.900$. Suppose we begin by assuming a uniform prior on the interval $[0, 1]$, so $\alpha = \beta = 1$, and over the course of the game the goalie faces $n = 50$ shots on goal. We can simulate the results of each of these 50 shots and iteratively compute the new posterior distribution given the result of each shot. The following graph displays the updated probability densities after every 10 shots, including the initial choice of prior $\text{Beta} \left( 1, 1 \right)$. The dashed line indicates the true value of $\theta = 0.900$:
+
+```{r Updated Beta Distributions (Static), echo = FALSE}
+n <- 50
+theta <- 0.900
+A.prior <- 1
+B.prior <- 1
+
+A <- c(A.prior)
+B <- c(B.prior)
+
+t <- seq(0, 1, by = 0.001)
+
+set.seed(1)
+for (i in 1:(n %/% 10)) {
+    shots <- as.numeric(runif(10) <= theta)
+    A <- c(A, last(A) + sum(shots))
+    B <- c(B, last(B) + sum(!shots))
+}
+
+posteriors <- sapply(1:length(A), function(x) dbeta(t, A[x], B[x])) %>%
+    as.data.frame() %>%
+    cbind(t, .) %>%
+    gather(key = post.num, value = post.den, paste("V", 1:(ncol(.) - 1), sep = "")) %>%
+    mutate(shots = as.numeric(substring(post.num, 2)) - 1,
+           saves = A[shots + 1] - 1,
+           goals = B[shots + 1] - 1)
+
+ggplot(posteriors, aes(x = t, y = post.den, color = post.num)) +
+    geom_line(size = 1.2) +
+    geom_vline(xintercept = theta, color = "black", lty = 2, size = 1.5) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = expression(theta),
+         y = "Density",
+         title = "Updated Distributions of Save Probability",
+         color = "Goals Allowed / Shots Faced") +
+    scale_color_discrete(labels = paste("x =", B - 1, "/", "n =", A + B - 2))
+```
+
+Note that as we observe more shots, the densities become narrower and more concentrated around 0.900 (which we know to be the true value of $\theta$), meaning that as we gain more information about the goalie's performance, we become more confident about our beliefs in $\theta$, and most of the mass of the posterior distribution becomes concentrated around the true value of $\theta$. However, it should be noted that the distribution after all 50 shots peaks at a value greater than $\theta = 0.900$, so clearly our Bayesian updating method doesn't perfectly estimate $\theta$ after just 50 shots (however, as $n$ increases indefinitely, we'd expect our posterior distribution to converge to a single point mass at the true value of $\theta$). In any case, we can see that the posterior distribution still indicates that $\theta = 0.900$ is very much within the realm of reason for our goalie, so while the estimation process isn't perfect, it is good enough for our purposes, and more importantly, it captures uncertainty to a good degree when we can never be truly certain about $\theta$.
+
+It may also be helpful to animate this graph by plotting the updated distribution after each shot on goal. The animation below displays the process of updating the density after each shot faced. The black line indicates the true value of $\theta = 0.900$, while the magenta line indicates the mean of the updated distribution:
+
+```{r Updated Beta Distributions (Animated), echo = FALSE}
+n <- 50
+theta <- 0.900
+A.prior <- 1
+B.prior <- 1
+
+A <- c(A.prior)
+B <- c(B.prior)
+
+t <- seq(0, 1, by = 0.001)
+
+set.seed(1)
+for (i in 1:n) {
+    shots <- as.numeric(runif(1) <= theta)
+    A <- c(A, last(A) + sum(shots))
+    B <- c(B, last(B) + sum(!shots))
+}
+
+posteriors <- sapply(1:length(A), function(x) dbeta(t, A[x], B[x])) %>%
+    as.data.frame() %>%
+    cbind(t, .) %>%
+    gather(key = post.num, value = post.den, paste("V", 1:(ncol(.) - 1), sep = "")) %>%
+    mutate(shots = as.numeric(substring(post.num, 2)) - 1,
+           saves = A[shots + 1] - 1,
+           goals = B[shots + 1] - 1,
+           g.status = paste("Shots Faced:", shots, "/", "Goals Allowed:", goals),
+           g.status = factor(g.status, levels = unique(g.status)))
+
+ggplot(posteriors, aes(x = t, y = post.den)) +
+    geom_area(fill = "limegreen", alpha = 0.7) +
+    geom_line(color = "black", size = 1.1) +
+    geom_rect(aes(xmin = theta - 0.001,
+                  xmax = theta + 0.001,
+                  ymin = -Inf,
+                  ymax = Inf),
+              color = "black", fill = "black") +
+    geom_rect(aes(xmin = ((saves + 1) / (shots + 2)) - 0.001,
+                  xmax = (saves + 1) / (shots + 2) + 0.001,
+                  ymin = -Inf,
+                  ymax = Inf),
+              color = "magenta3", fill = "magenta3") +
+    transition_states(g.status) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = expression(theta),
+         y = "Density",
+         title = "Updated Distributions of Save Probability",
+         subtitle = "{next_state}") +
+    ylim(0, NA)
+```
+
+On the surface, this animation should make clear what is happening when we iteratively compute posterior distributions. Early on, the mass of the distribution is spread out, but we can see it become more concentrated over time to indicate increasing confidence in our posterior beliefs. Recall from the static graph that our theoretical goalie allowed 4 goals on 50 shots, and note that we can clearly observe the density shift to the left four times -- these shifts occur when the four goals are allowed. After every other shot, the mass of the density shifts toward 1, and as we approach 50 shots faced, the posterior mean appears to be converging to the true value of $\theta$ (although it does increase slightly beyond the true value).
+
+Essentially, this updating scheme provides a way to quantify our confidence in our estimation of $\theta$. For low values of $n$, there is still a lot of uncertainty in our judgments about $\theta$, but every shot gives us more information, so as we continue to observe more and more shots on goal, we should begin to believe that $\theta$ falls into a smaller and smaller range with higher probability, informally quantifying our confidence in both our goalie and in our judgments about their save probability in the current game. It would therefore be reasonable, at least in theory, to use this method of Bayesian inference to codify our judgments about our starting goalie as the game progresses.
+
+## Creating a Decision Rule
+
+Now that we have established a way to model our beliefs about our goalies, there are still two questions we need to answer in order to create a decision rule:
+
+* How should we choose the values of $\alpha$ and $\beta$ for our initial prior distribution?
+* Given the posterior distribution of $\theta$, exactly *how* do we convert the distribution into a decision rule with a binary choice?
+
+Because of the theoretical nature of our decision process to this point, we will focus more on the *process* of crafting a decision rule using this model, rather than using data to create an optimal decision rule -- this will be explored in future parts.
+
+### Choosing a Prior
+
+While we could choose any positive values of $\alpha$ and $\beta$ for our initial prior, we would like them to reflect a reasonable opinion that a coach could have at the beginning of a hockey game. Here we will propose a few possible priors, along with the primary justification for choosing each one.
+
+#### Uninformative Priors
+
+We have already mentioned the uniform prior on $[0, 1]$, which is equivalently characterized by the $\text{Beta} \left( 1, 1 \right)$ distribution, as a potential choice of prior. Most likely, the uniform prior is not an accurate representation of the distribution of $\theta$, as a uniform prior would indicate that we believe that $\Pr \left( \theta \leq 0.100 \right) = \Pr \left( \theta \geq 0.900 \right) = 0.10$ -- in the context of this problem, this would indicate that we believe that our starter allowing over 90% of the shots they face and our starter saving over 90% of the shots they face have equal probability of being true. While this is almost certainly not the case, we may believe that the amount of uncertainty in how our starter is going to perform on a given night is so large that we don't want to be overconfident in our goalie's ability for a single game. This is the main benefit of choosing an *uninformative prior* -- if we believe that our goalie's past performance has little to no effect on how they're going to perform tonight, then we might want to choose a prior that is not biased toward any one particular outcome, such as the uniform prior that assigns equal likelihood to any possible probability in $[0, 1]$.
+
+In addition, there is another uninformative prior that we might wish to use instead. The $\text{Beta} \left( 1/2, 1/2 \right)$ prior is shown on the graph below (note that the density goes to infinity at both 0 and 1, but is still a valid probability density):
+
+```{r Uninformative Prior, echo = FALSE}
+ui.prior <- dbeta(seq(0, 1, by = 0.001), 1/2, 1/2) %>%
+    cbind(t = seq(0, 1, by = 0.001), d = .) %>%
+    as.data.frame()
+
+ggplot(ui.prior, aes(x = t, y = d)) +
+    geom_area(fill = "limegreen", alpha = 0.7) +
+    geom_line(size = 1.2) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = expression(theta),
+         y = "Density",
+         title = "Beta(1/2, 1/2) Distribution") +
+    coord_cartesian(ylim = c(0, 3))
+```
+
+Unlike the uniform prior, this prior places most of the mass near $\theta = 0$ and $\theta = 1$. While it would seem to be more informative than the uniform prior, if we truly knew nothing about the goalie's save probability or the process of a goalie facing shots on goal, then we might believe that either all shots would be stopped or all shots would go in. More generally, if we are observing a process that ends with either success or failure, but we know nothing else about the process, then we might believe that the process is *deterministic* before we observe anything -- that is, we might believe that the probability of success is either 1 or 0, at least until we see the process produce both success and failure. This prior may be less intuitive, since we know that shutouts are relatively rare and goalies almost certainly won't let in every shot they face on a given night, but if we want to enter each game with no bias toward the goalie's past performances, this is another possible choice of uninformative prior.
+
+#### Data-Driven Priors
+
+```{r Goalie Data, echo = FALSE}
+beta.mom <- function(m, v) {
+    # m = sample mean
+    # v = sample variance
+    # return (a.hat, b.hat), the method-of-moments estimators of the beta distribution
+    a.hat <- m * (((1 - m) / v) - 1)
+    b.hat <- (1 - m) * (((1 - m) / v) - 1)
+    return(c(a.hat, b.hat))
+}
+
+# read in shot data
+all.shots <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/shots_2007_2020.csv",
+                      stringsAsFactors = FALSE)
+shot.events <- c("SHOT", "GOAL")
+
+# read in game-level data
+games <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/games_2007_2021.csv",
+                  stringsAsFactors = FALSE)
+
+team.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = teamCode,
+           opponent = ifelse(teamCode == homeTeamCode,
+                             awayTeamCode,
+                             homeTeamCode),
+           home = ifelse(teamCode == homeTeamCode,
+                         "Home",
+                         "Away")) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(shots = n(),
+              goals = sum(event == "GOAL"))
+
+goalie.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = ifelse(teamCode == homeTeamCode,
+                         awayTeamCode,
+                         homeTeamCode),
+           opponent = teamCode,
+           home = ifelse(teamCode == homeTeamCode,
+                         "Away",
+                         "Home"),
+           shot.goalie = goalieNameForShot) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(starter = first(shot.goalie[shot.goalie != ""]),
+              st.shots.against = sum(shot.goalie != "" &
+                                         shot.goalie == first(shot.goalie[shot.goalie != ""])),
+              st.goals.against = sum(shot.goalie != "" &
+                                         shot.goalie == first(shot.goalie[shot.goalie != ""]) &
+                                         event == "GOAL")) %>%
+    mutate(st.svp = 1 - (st.goals.against / st.shots.against),
+           st.svp.adj = (st.shots.against - st.goals.against + 1) / (st.shots.against + 2),
+           rbs = as.numeric(st.svp <= 0.85))
+
+game.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = teamCode,
+           opponent = ifelse(teamCode == homeTeamCode,
+                             awayTeamCode,
+                             homeTeamCode),
+           home = ifelse(teamCode == homeTeamCode,
+                         "Home",
+                         "Away"),
+           win = ifelse(teamCode == homeTeamCode,
+                        homeTeamWon,
+                        1 - homeTeamWon)) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(win = mean(win))
+
+game.date <- games %>%
+    filter(season >= 2014 & season <= 2020) %>%
+    filter(playoffGame == 0) %>%
+    mutate(game_id = gameId %% 1e5,
+           opponent = opposingTeam,
+           home = ifelse(home_or_away == "HOME",
+                         "Home",
+                         "Away"),
+           date = ymd(gameDate)) %>%
+    group_by(season, game_id, team, opponent, home, date) %>%
+    summarise()
+
+shot.data <- game.date %>%
+    inner_join(team.info) %>%
+    inner_join(goalie.info) %>%
+    inner_join(game.info) %>%
+    ungroup() %>%
+    mutate(team = as.factor(team),
+           opponent = as.factor(opponent),
+           home = as.factor(home)) %>%
+    filter(shots >= 10)
+
+svp <- shot.data$st.svp.adj
+svp.mean <- mean(svp)
+svp.var <- var(svp)
+
+beta.params <- beta.mom(svp.mean, svp.var)
+svp.A <- beta.params[1]
+svp.B <- beta.params[2]
+
+beta.mle <- fitdistr(svp, "beta", start = list(shape1 = svp.A, shape2 = svp.B), lower = c(0, 0))
+svp.mle.A <- beta.mle$estimate[1]
+svp.mle.B <- beta.mle$estimate[2]
+
+svp.x <- seq(0, 1, by = 0.001)
+svp.mm <- dbeta(svp.x, shape1 = svp.A, shape2 = svp.B)
+svp.mle <- dbeta(svp.x, shape1 = svp.mle.A, shape2 = svp.mle.B)
+svp.density <- data.frame(svp.x = svp.x,
+                          svp.mm = svp.mm,
+                          svp.mle = svp.mle)
+```
+
+Instead of using an uninformative prior, we could use information from previous performances to create a prior that may be more realistic in terms of what distribution a goalie's save probability might follow. For example, we might want to use the goalie's most recent game to inform our choice of prior. If the goalie faced $n$ shots and allowed $x$ goals, then we might want to choose $\alpha = 1 + n - x$ and $\beta = 1 + x$ -- that is, we could effectively use the posterior distribution from the previous game (if we started with a uniform prior) as our new prior for the goalie's next game. (The additional 1 in each parameter is to ensure that neither $\alpha$ nor $\beta$ is 0, as would be the case if the goalie posted a shutout in their previous game.) If we wanted to use a larger sample of data, we could also consider the goalie's previous $k$ games (where $k$ is an arbitrary positive integer of our choice), taking the total number of saves and total number of goals allowed as $\alpha$ and $\beta$, respectively.
+
+Using this method of selecting a prior would indicate a good deal of confidence in our estimate of $\theta$, as we would be using a full game's worth of shots to inform our prior, instead of taking an uninformative prior (recall that larger values of $\alpha$ and $\beta$ convey more confidence in our prior beliefs). However, while this would provide a more realistic prior for $\theta$, it could also be detrimental to our end goal. As an example, if our goalie posted a 50-save shutout in their previous game, the prior for the current game could inspire overconfidence in $\theta$ being very close to 1, so if the starter then allows 2 goals on 3 shots, our posterior distribution would still be highly confident in the goalie's ability, even though the evidence for this game quickly appears to be suggesting otherwise. Then again, if our goalie posted a shutout in their previous game, we might be willing to give them more slack in their next game. Using more than one previous game to inform a prior constructed in this way would only serve to provide more confidence in our beliefs, which would amplify both the advantages and disadvantages of choosing a prior in this way.
+
+As an alternative to taking raw save and goal totals to inform our choice of prior, another possible option would be to fit a beta distribution to previously observed values of $\theta$. Since we are assuming that $\theta$ is a random variable that is realized as a fixed value for each game a goalie plays, it may be reasonable to record the values of $\theta$ for several goalie starts and fit a beta distribution to those values. While $\theta$ is unknown for each game (since under our model assumptions we cannot ever be certain of the goalie's true save probability), we can obtain a point estimate for $\theta$ from each game by using *Laplace's rule of succession*, which states that if we observe $n$ shots on goal and $x$ goals and nothing else, the probability that the next shot would be saved is equal to $(n - x + 1) / (n + 2)$. In fact, this is the mean of the posterior distribution obtained if we observe $x$ goals on $n$ shots and assume a uniform prior on $\theta$. Since we *can* observe the values of $n$ and $x$ for each goalie start, we can consider estimates of $\theta$ under the rule of succession. In the context of this problem, our estimates for $\theta$ are close to our usual understanding of save percentage, but we need to modify them in order to account for our uncertainty -- we are assuming that the true value of $\theta$ is still unknown after the game ends, but typically we understand save percentage within a game to be the proportion of shots saved by the goalie, which is always known after the game ends.
+
+Then, given estimates of $\theta$ (obtained via the rule of succession) from some sample of $k$ games that we have observed, denoted $\hat{\theta}_{1}, \dots, \hat{\theta}_{k}$, we can attempt to find the values of $\hat{\alpha}$ and $\hat{\beta}$ such that the $\text{Beta} \left( \hat{\alpha}, \hat{\beta} \right)$ distribution best fits the observed values of $\hat{\theta}_{1}, \dots, \hat{\theta}_{k}$. Without getting too deep into the statistical theory, there are two main ways to fit a distribution in this way: using the method of moments, or using maximum likelihood estimation.
+
+However, before fitting any distributions, we first need to obtain some data. [MoneyPuck.com](<https://moneypuck.com/>) provides a dataset for download containing information about all unblocked shots beginning in the 2007-2008 season, with 124 features for each shot. For this preliminary exploration, we are only concerned with the number of shots faced and goals allowed by the *starting* goalies for each team in each game played. We will also restrict our attention to regular season games played from the 2014-2015 season through the 2020-2021 season, and we will only consider shots faced and goals allowed in regulation time (since overtime hockey is played at a far different pace from regulation hockey). From this information, we can compute an estimated save probability for each goalie start. The smoothed density of these estimated save probabilities is shown below:
+
+```{r Smoothed SVP Density, echo = FALSE}
+ggplot(shot.data, aes(x = st.svp.adj, y = ..density..)) +
+    stat_density(fill = "limegreen",
+                 alpha = 0.7,
+                 adjust = 2) +
+    geom_density(col = "black",
+                 size = 1.1,
+                 adjust = 2) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = expression(theta),
+         y = "Density",
+         title = "Smoothed Density of Estimated Starter Save Probabilities",
+         subtitle = "2014-15 Through 2020-2021",
+         caption = "Data via MoneyPuck.com") +
+    xlim(0, 1)
+```
+
+Given the sample average $\bar{x}$ and the sample variance $s^{2}$ of a sample of observations drawn from a $\text{Beta} \left( \alpha, \beta \right)$ distribution, the method-of-moments estimators $\hat{\alpha}_{\text{MM}}$ and $\hat{\beta}_{\text{MM}}$ are computed by
+
+\begin{align}
+\hat{\alpha}_{\text{MM}} &= \bar{x} \left( \frac{\bar{x} \left( 1 - \bar{x} \right)}{s^{2}} - 1 \right) \\
+\hat{\beta}_{\text{MM}} &= \left( 1 - \bar{x} \right) \left( \frac{\bar{x} \left( 1 - \bar{x} \right)}{s^{2}} - 1 \right)
+\end{align}
+
+assuming that $\bar{x} \left( 1 - \bar{x} \right) > s^{2}$. We find that $\hat{\alpha}_{\text{MM}} \approx `r round(svp.A, 3)`$ and $\hat{\beta}_{\text{MM}} \approx `r round(svp.B, 3)`$. The method-of-moments density is represented by the dashed line in the plot below, along with the actual density of estimated starter save probabilities:
+
+```{r SVP Density MM, echo = FALSE}
+ggplot(shot.data, aes(x = st.svp.adj, y = ..density..)) +
+    stat_density(fill = "limegreen",
+                 alpha = 0.4,
+                 adjust = 2) +
+    geom_density(col = "gray70",
+                 size = 1.1,
+                 adjust = 2) +
+    geom_line(data = svp.density, aes(x = svp.x, y = svp.mm),
+              col = "black",
+              size = 1.2,
+              lty = 2) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = expression(theta),
+         y = "Density",
+         title = "Smoothed Density of Estimated Starter Save Probabilities",
+         subtitle = "Method of Moments",
+         caption = "Data via MoneyPuck.com")
+```
+
+This fitted distribution is relatively similar to the actual distribution, although the range of $\theta$ around the mode of the fitted distribution has less mass than in the actual distribution, which is made up for by the fitted density having slightly more mass in the range around $\theta = 0.80$. For the maximum likelihood estimators of $\alpha$ and $\beta$, we cannot obtain closed forms, but we can use any simple statistical software to compute $\hat{\alpha}_{\text{MLE}} \approx `r round(svp.mle.A, 3)`$ and $\hat{\beta}_{\text{MLE}} \approx `r round(svp.mle.B, 3)`$, which gives the following distribution:
+
+```{r SVP Density MLE, echo = FALSE}
+ggplot(shot.data, aes(x = st.svp.adj, y = ..density..)) +
+    stat_density(fill = "limegreen",
+                 alpha = 0.4,
+                 adjust = 2) +
+    geom_density(col = "gray70",
+                 size = 1.1,
+                 adjust = 2) +
+    geom_line(data = svp.density, aes(x = svp.x, y = svp.mle),
+              col = "black",
+              size = 1.2,
+              lty = 2) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = expression(theta),
+         y = "Density",
+         title = "Smoothed Density of Estimated Starter Save Probabilities",
+         subtitle = "Maximum Likelihood",
+         caption = "Data via MoneyPuck.com")
+```
+
+The shape of this fitted distribution appears to be slightly better than the previous fitted distribution, although the differences do not appear to be significant (as evidenced by the small differences between the values of the two estimators). For these reasons, either method of parameter estimation is likely appropriate for this exercise, although maximum likelihood estimation is typically preferred in general statistical settings.
+
+It is worth noting again that this part of the project is not attempting to find an optimal prior, nor is it attempting to make any suggestions about what we should be using as a prior. With that in mind, either of the priors computed here via the method of moments or via maximum likelihood estimation are reasonable choices of prior. Neither set of estimators is perfect, but they each provide a prior that, in general, provides more confidence in our starter than an uninformative prior, but not as much confidence in our starter as simply using the raw shot and goal totals from their previous game(s). The most important thing to note is that it appears that estimated starter save probabilities do closely follow a beta distribution, and that the method of moments and maximum likelihood estimation both seem to be viable methods of creating a prior.
+
+While we could simply choose the previous $k$ league-wide starter performances to create a prior in this way, which would give us a fairly large sample size of estimated starter save probabilities, it may be the case that we want to tailor our prior more closely to our team's goalie(s). In this regard, we could also restrict our estimates $\hat{\theta}_{k}$ to either the team level or the goalie level. As an extreme example, we would likely expect the distribution of $\theta$ to be much different for a recent Vezina trophy winner compared to a rookie or aging veteran, so we may want to include only performances from our Vezina-winning goalie in fitting a prior for their next game. Conversely, we also might want to temper our expectations a bit -- we know that even Vezina winners have bad games from time to time, so we may want our prior to reflect that possibility as being more likely than just the Vezina winner's recent games might suggest, in which case we might want to include all goalie starts from across the league.
+
+With all of this in mind, the upshot here is that there are several possibilities for how to use past game performances to craft a prior -- the suggestions proposed here are meant to be a good baseline of possible priors that a coach could have about their goalies, but by no means do they comprise a complete list of good choices of prior.
+
+### Converting the Posterior Into a Decision Rule
+
+Suppose now that we have chosen $\alpha$ and $\beta$ to encode our prior beliefs, and by the previous discussion we know that if our goalie has given up $x$ goals on $n$ shots, we will be representing our current belief about their performance by a $\text{Beta} \left( \alpha + n - x, \beta + x \right)$ distribution. However, now that we have this distribution, what do we do with it? A probability density can't make a decision for us, so we need to come up with a way to compute some information from the distribution we have, and then to convert that information into a decision. Similarly to the previous section on choosing a prior, this section is not going to be focused on optimizing a decision rule -- we are simply going to discuss some ways we can manipulate the distribution we have, as well as some additional parameters we may want to consider when deciding *when* during the game we want to make a decision.
+
+#### Really Bad Starts (RBS)
+
+Really Bad Starts, abbreviated RBS, is a statistic created by Rob Vollman (now with the Los Angeles Kings) for the [Hockey Abstract](<http://www.hockeyabstract.com/>). A goalie is credited with an RBS whenever they start a game and finish with a save percentage below 0.85 -- after all, teams whose starting goalie posted an RBS won only 12.35% of the time between 2014-2015 and 2020-2021. If we restrict that to games where only one of the two starting goalies posted an RBS, the teams whose goalie posted an RBS have a win rate of only 6.89% between 2014-2015 and 2020-2021 (both of these win percentages were computed using the MoneyPuck dataset). It would therefore seem like one good way to decide if our goalie is having a bad game is by attempting to classify their game as an RBS (I briefly discussed the process of doing this in a [Twitter thread](<https://twitter.com/ianferer/status/1396541656007127042?s=20&t=llEIHbaDHD6H0PnmTZm6PA>) during the 2021 playoff series between the Hurricanes and Predators). Given the current posterior distribution of $\theta$ after observing $x$ goals allowed on $n$ shots, we then want to compute
+
+\[ \Pr \left( \text{RBS} \right) = \Pr \left( \theta \leq 0.85 \right) = \int_{0}^{0.85} \pi \left( y \mid x, \alpha, \beta \right) \ d y \]
+
+Luckily, this is not difficult to compute. However, once we have $\Pr \left( \text{RBS} \right)$, we need to use it to make a decision. A reasonable idea would be to classify the start as an RBS (and thus pull the starter) if $\Pr \left( \text{RBS} \right)$ is greater than some threshold $t \in [0, 1]$ -- but how should we choose $t$? In order to choose $t$, we first need to decide what the penalty should be for both types of incorrect decision. That is, if $\Pr \left( \text{RBS} \right) \geq t$, but the goalie isn't actually having a bad game, how should we penalize that wrong decision? What about if $\Pr \left( \text{RBS} \right) < t$, but the goalie is actually having a bad game? Assigning costs to these decisions is crucial in choosing a threshold $t$, but there are many ways to assign costs. If we are strictly trying to maximize our chances of winning, we may decide that we'd rather incorrectly pull the goalie during a good game than incorrectly leave in the goalie during a bad game, in which case we'd choose a lower value of $t$. If instead our job is in danger and we want to avoid making a catastrophically bad decision in the eyes of fans, media, and ownership, we might be willing to leave in the starter for a longer time, rather than making a quick judgment that could turn out incorrect, in which case we'd want $t$ to be much closer to 1. If all we are concerned with is making the right decision as much as possible, then we'd probably want to choose $t = 0.50$, or very close to 0.50. The important thing is that there are multiple ways to choose $t$ so that our decision rule is tailored to how we want to make our goalie decisions.
+
+#### Comparing Values of $\theta$
+
+While classifying starts as good or bad based on the CDF of $\theta$ for our starter is a simple computation, decision rules crafted in that way do not take into account our beliefs about the backup goalie. As mentioned previously, we would probably consider a Vezina-winning goalie and an aging veteran backup goalie to have very different prior distributions on their save probabilities. Therefore, while we might have good reason to believe that our Vezina-winning starter is having a bad game, it could be the case that our starter having a bad game is still better than our backup having an okay game (by their respective standards). Instead of classifying the starter's game just based on their own value of $\theta$, we could compute the probability that the starter's save probability is lower than the backup's save probability. With respect to our model, if we assume prior distributions
+
+\begin{align}
+\theta_{S} & \sim \text{Beta} \left( \alpha_{S}, \beta_{S} \right) \\
+\theta_{B} & \sim \text{Beta} \left( \alpha_{B}, \beta_{B} \right)
+\end{align}
+
+for the starting goalie and backup goalie, respectively, and we observe the starter give up $x$ goals on $n$ shots, we would then have
+
+\[ \theta_{S} \sim \text{Beta} \left( \alpha_{S} + n - x, \beta_{S} + x \right) \]
+
+and then we could compute
+
+\[ \Pr \left( \theta_{S} \leq \theta_{B} \right) = \int_{0}^{1} \int_{0}^{y} \pi_{S} \left( z \mid x \right) \pi_{B} \left( y \right) \ d z \ d y \]
+
+Similarly to before, since we know the form of $\pi_{S} \left( \cdot \right)$ and $\pi_{B} \left( \cdot \right)$, this is not difficult to compute with the right software. We would again need to choose a threshold $t$ such that we pull the starter if $\Pr \left( \theta_{S} \leq \theta_{B} \right) \geq t$ and leave in the starter otherwise, but this can be done exactly the same way as detailed above. Of course, there are likely other reasonable ways to convert a beta distribution into a decision rule -- these are only a few suggestions.
+
+#### Other Considerations
+
+Assume now that we have a decision rule $d \left( \cdot \right)$ that takes as input the parameters defining the posterior distribution of $\theta$ for the starting goalie (and possibly some other arguments as well), and returns a decision either to pull the starter or leave in the starter. How should we be using it? That is, at what points during the game should we be considering a goalie change, and how should we be using game-state information to help us with this decision? Of course, we can only make a goalie change during a stoppage in play, but we almost certainly shouldn't be considering a goalie change at every stoppage. Conventionally, we would only consider pulling the starter after a goal against or after an intermission -- after all, the starter making a save would only serve to improve our judgment of them, and no other information except for goals allowed is affecting our posterior beliefs about the goalie. As for switching goalies coming out of an intermission, we may want to pull our goalie after a goal, but if there is little time left on the clock, we may choose to just wait that time out and regroup during the intermission.
+
+That said, consider the following situation: our goalie gives up 3 goals in the first period, but the team in front of the goalie holds the opposition to only 7 shots on goal, while generating 16 shots on goal and scoring none. We're likely not very confident in our goalie, but the rest of the team is playing well. We don't want to make a quick judgment, so we leave the starter in net. However, our team scores 2 quick goals to begin the second period, and all of a sudden it's a close game again. The last thing we want is for a bad goalie to tank this comeback before we can finish it off, so maybe we now have more to lose if a bad game from our starter winds up costing us in the end. Should we pull the starter now that we seem to have a better chance of actually winning the game? In other words, should we consult $d \left( \cdot \right)$ for a recommended decision after scoring a goal ourselves? At the very least, this (maybe uncommon) example might influence us to consult our decision rule in some less-conventional instances.
+
+Additionally, we need to consider common situations where we might want to overrule the decision rule. We probably won't ever want to pull the starter if our decision rule is telling us that they're having a good game, so instead we'll only consider situations where $d \left( \cdot \right)$ returns a decision to pull the starter, but we might have reason to be more conservative. A simple example would be the case where the starter gives up a goal on their first shot faced. If we choose the maximum likelihood estimators $\hat{\alpha}_{\text{MLE}}$ and $\hat{\beta}_{\text{MLE}}$ computed previously as our prior, we have $\Pr \left( \text{RBS} \right) \approx `r round(pbeta(0.85, shape1 = svp.mle.A, shape2 = svp.mle.B), 3)`$ with just the initial prior distribution, but if the goalie allows 1 goal on 1 shot, we then have $\Pr \left( \text{RBS} \right) \approx `r round(pbeta(0.85, shape1 = svp.mle.A, shape2 = svp.mle.B + 1), 3)`$. Depending on our choice of threshold $t$, this could result in a suggested goalie switch extremely early in the game. The uncertainty in our judgment would still be extremely large, and we'd be risking a lot of earned respect and reputation if we wound up being wrong. For this reason, a good idea would be to have a minimum number of goals allowed before evaluating the starter. That said, this minimum shouldn't be too large, as if we waited until the starter allowed 5 goals to evaluate whether they're having a bad night, it would almost always be too late for pulling the starter to make any difference.
+
+We would also probably like to consider the amount of time remaining in the game, both when there is a lot of time remaining and when the game is nearly over. We likely wouldn't want to pull the starter 2 minutes into the game, even if they did give up a bad goal early. On the other hand, if we're down 4-2 with 10 minutes left in the third period, and our starter allows a fifth goal, does it really matter if we make the right decision about their play? Is there any reward to pulling them this late? Furthermore, what if this is the first game of a back-to-back, and the backup on the bench is starting tomorrow night? In that situation, we might just want to punt on tonight's game, let tomorrow's starter rest, and hope we can salvage the second night.
+
+In a similar vein, we also need to consider information beyond just our decision rule $d \left( \cdot \right)$ and some game-state data. A goalie giving up 2 goals on 4 shots in 10 minutes looks bad on the box score, but if both goals came from high-danger scoring chances, we might be willing to give the starter some leniency before pulling them in favor of the backup. This is where expected goals could come in handy -- while we may not be able to obtain shot probabilities in real time, we can always consult them after the fact as a supplement to the immediate decision we can obtain from our decision rule.
+
+Again: the most important thing here is the *process* behind creating the decision rule $d \left( \cdot \right)$ and then making actionable decisions, regardless of whether they agree with the output of $d \left( \cdot \right)$. This process is *not* intended to erase the need for subjective judgment about the starting goalie -- it is merely meant to supplement our decision-making process with a mathematical model that captures the volatility in the task we're trying to accomplish, in order to hopefully help us make better-informed decisions that could help us win more hockey games.
+
+### An Example Decision Rule
+
+```{r Pull Chart, echo = FALSE}
+pull.decision <- function(g, s, A, B, mg, t) {
+    # g = goals allowed
+    # s = shots against
+    # A, B = encoding for beta prior on save percentage
+    # mg = min. number of goals before evaluating
+    # t = threshold on Pr(RBS)
+    if (g >= mg) {
+        p <- pbeta(0.85, shape1 = A + s - g, shape2 = B + g)
+        return(p >= t)
+    }
+    return(FALSE)
+}
+
+prob.rbs <- function(g, s, A, B, mg) {
+    # g = goals allowed
+    # s = shots against
+    # A, B = encoding for beta prior on save percentage
+    # mg = min. number of goals before evaluating
+    if (g >= mg) {
+        p <- pbeta(0.85, shape1 = A + s - g, shape2 = B + g)
+        return(p)
+    }
+    return(0)
+}
+
+pull.d <- Vectorize(pull.decision)
+p.rbs <- Vectorize(prob.rbs)
+
+max.shots <- 50
+max.goals <- 10
+shot.n <- rep(0:max.shots, rep(max.goals + 1, max.shots + 1))
+goal.x <- rep(0:max.goals, max.shots + 1)
+A <- 1
+B <- 1
+min.goals <- 4
+t <- 0.5
+
+possible.nx <- (shot.n >= goal.x)
+shot.n <- shot.n[possible.nx]
+goal.x <- goal.x[possible.nx]
+
+pull.goalie <- as.factor(as.numeric(pull.d(goal.x, shot.n, A, B, min.goals, t)))
+rbs.prob <- p.rbs(goal.x, shot.n, A, B, 0)
+pull.chart <- data.frame(shots = shot.n, goals = goal.x, pull = pull.goalie, rbs.prob = rbs.prob)
+```
+
+Given all of the components that go into creating a decision rule, it will be helpful to craft an example and illustrate how we could use it during a game. For this toy example, suppose that our usual starting goalie played last night and faced 50 shots, so the recently-signed rookie backup is playing their first game in the NHL, and we have no idea what to expect from their performance. It then seems reasonable to choose a uniform $\text{Beta} \left( 1, 1 \right)$ prior for this goalie. For our decision rule, we're going to attempt to correctly classify whether this start will be an RBS, as it's a slightly simpler decision method that doesn't involve our backup (who we don't really want to throw into action tonight, based on their workload from yesterday). We'll also choose $t = 0.5$, as for this one game we're just interested in making a correct classification. However, we don't want to destroy our rookie starter's confidence, so we're willing to give them 3 goals without considering pulling them. That is, we won't consider the output from $d \left( \cdot \right)$ until the starter gives up their fourth goal (if it comes to that). Now that we've constructed $d \left( \cdot \right)$ and imposed some additional constraints on our decision-making process, we could have a computer on stand-by to compute $\Pr \left( \text{RBS} \right)$ after each goal allowed, but we can speed up the process a bit by creating a pull chart beforehand that considers all reasonable combinations of shots faced $n$ and goals allowed $x$, and provides a visual indicator of whether we should be pulling the goalie at that value of $\left( n, x \right)$. For this task -- attempting to correctly classify whether the goalie will be credited with an RBS -- using a $\text{Beta} \left( 1, 1 \right)$ prior, a $\Pr \left( \text{RBS} \right)$ threshold of $t = 0.5$, and not pulling the starter until they give up 4 goals at minimum, we obtain the following pull chart:
+
+```{r Pull Chart (Binary), echo = FALSE}
+ggplot(pull.chart, aes(xmin = shots, xmax = shots + 1, ymin = goals, ymax = goals + 1, fill = pull)) +
+    geom_rect(color = "black") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_blank()) +
+    labs(x = "Shots Faced",
+         y = "Goals Allowed",
+         title = "Pull Chart",
+         subtitle = "Beta(1,1) Prior / Pr(RBS) > 0.5 / Min. 4 Goals Allowed",
+         fill = "Decision") +
+    scale_x_continuous(breaks = seq(0.5, max.shots + 0.5, 1),
+                       labels = ifelse((0:max.shots) %% 5 == 0, as.character(0:max.shots), ""),
+                       expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(0.5, max.goals + 0.5, 1),
+                       labels = ifelse((0:max.goals) %% 2 == 0, as.character(0:max.goals), ""),
+                       expand = c(0, 0)) +
+    scale_fill_viridis_d(labels = c("Keep Starter", "Pull Starter"))
+```
+
+It also may be the case that we don't want to choose a threshold immediately -- we may want to weigh our subjective opinion of the goalie against our current Bayesian estimate of $\Pr \left( \text{RBS} \right)$, in which case we can also easily create a chart that colors each $\left( n, x \right)$ pair by $\Pr \left( \text{RBS} \right)$ for a goalie allowing $x$ goals on $n$ shots under our choice of prior. We then obtain the following pull chart:
+
+```{r Pull Chart (Continuous), echo = FALSE}
+ggplot(pull.chart, aes(xmin = shots, xmax = shots + 1, ymin = goals, ymax = goals + 1, fill = rbs.prob)) +
+    geom_rect(color = "black") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_blank()) +
+    labs(x = "Shots Faced",
+         y = "Goals Allowed",
+         title = "Pull Chart",
+         subtitle = "Beta(1,1) Prior",
+         fill = "Pr(RBS)") +
+    scale_x_continuous(breaks = seq(0.5, max.shots + 0.5, 1),
+                       labels = ifelse((0:max.shots) %% 5 == 0, as.character(0:max.shots), ""),
+                       expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(0.5, max.goals + 0.5, 1),
+                       labels = ifelse((0:max.goals) %% 2 == 0, as.character(0:max.goals), ""),
+                       expand = c(0, 0)) +
+    scale_fill_viridis_c(limits = c(0, 1))
+```
+
+For this example, since we don't want to evaluate our goalie until they've allowed 4 goals, we can effectively treat $\Pr \left( \text{RBS} \right)$ as 0 for any pair $\left( n, x \right)$ with $x < 4$, in which case we obtain the following pull chart, which might be easier to read and interpret under the conditions we've established:
+
+```{r Pull Chart (Continuous with min. goals), echo = FALSE}
+rbs.prob <- p.rbs(goal.x, shot.n, A, B, min.goals)
+pull.chart <- data.frame(shots = shot.n, goals = goal.x, pull = pull.goalie, rbs.prob = rbs.prob)
+
+ggplot(pull.chart, aes(xmin = shots, xmax = shots + 1, ymin = goals, ymax = goals + 1, fill = rbs.prob)) +
+    geom_rect(color = "black") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_blank()) +
+    labs(x = "Shots Faced",
+         y = "Goals Allowed",
+         title = "Pull Chart",
+         subtitle = "Beta(1,1) Prior / Min. 4 Goals Allowed",
+         fill = "Pr(RBS)") +
+    scale_x_continuous(breaks = seq(0.5, max.shots + 0.5, 1),
+                       labels = ifelse((0:max.shots) %% 5 == 0, as.character(0:max.shots), ""),
+                       expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(0.5, max.goals + 0.5, 1),
+                       labels = ifelse((0:max.goals) %% 2 == 0, as.character(0:max.goals), ""),
+                       expand = c(0, 0)) +
+    scale_fill_viridis_c(limits = c(0, 1))
+```
+
+Given the current number of shots our starter has faced and the number of goals they've allowed, we can then immediately look up the corresponding cells on each of these charts to obtain the decision returned by $d \left( \cdot \right)$ or the estimated value of $\Pr \left( \text{RBS} \right)$, depending on what we choose to use. While the merits of this particular rule $d \left( \cdot \right)$ are up for debate, the simplicity of these charts allows for an easy consultation guide for a coach who has other decisions to make during a hockey game (including setting forechecking tactics, optimizing line combinations and matchups, deciding when to call a timeout, and deciding when to pull the goalie for an extra attacker, among several others). Analogous charts to these can be easily created for any choice of prior and threshold, and if we define a prior for the backup goalie as well, we can create a pull chart for the other type of decision rule proposed here, where we compute the probability that the starter is better than the backup.
+
+## Conclusion
+
+This analysis provides a heuristic approach to judging a goalie within a single game. We've taken Bayesian inference -- which informally amounts to updating beliefs with more information -- and applied it to the evaluation of a goaltender based on a statistic that they can control. The modeling techniques presented here are in no way perfect, as several assumptions are made to simplify the game of hockey down to a sequence of Bernoulli trials that are entirely dependent on goalies. However, the goal of this part of the project is not to create a perfect tool that tells us when to pull our starting goalie for having a bad game, but instead to propose a new way of mathematically modeling and thinking about how to judge goalies during a game, as this is a tool a coach could use to influence their team's chances of winning the game. While we typically see coaches make changes to line combinations, attempt to get favorable matchups against opponents' lines, and optimize player usage by way of zone starts, we rarely see analogous techniques applied to optimizing goalie play -- the processes introduced here are meant to be a preliminary exploration into how we might be able to do that.
+
+That said, it is clear that there are several deficiencies with using only the work presented here. As explained previously, this analysis provides no evaluation of any priors or decision rules proposed. We could use a historical sample of goalie starts and attempt to find the parameters that will optimize some classification accuracy metric, such as the false pull rate, the false keep rate, the total error rate, or the log loss of our estimated probabilities, among many others. However, because this model is theoretical, there are several parameters we'd need to tune in order to find an optimal decision rule, including the prior parameters $\alpha$ and $\beta$, the threshold $t$, the minimum number of goals allowed before evaluation, and even the type of decision rule. Furthermore, simply evaluating a classifier based on the correctness of the decision does not account for any time-dependence of the decision, since clearly we'd want to be rewarded more for an early correct decision than a late correct decision, and similarly penalized with incorrect decisions. There are simply too many parameters we would need to optimize over in order to find a single optimal decision rule of the types mentioned here.
+
+Therefore, in order to transform this work into something more usable, we need to use the methods proposed here in conjunction with some way to quantify not just the correctness of a decision, but also the associated cost and/or reward of a decision. While some ways to assign costs to decisions were discussed, if we want to provide any evidence that this methodology is a good way to evaluate goalies in real time and not just a theoretical approach to the problem, we need to figure out exactly how switching goalies could improve a team's chances of winning. With that in mind, the logical next step would be to make a decision based on a team's current win probability -- after all, if the team has a higher probability of winning with the backup in net than with the starter in net, we should switch goalies. Therefore, the next part of this project will be focused on creating and evaluating a win probability model that incorporates the in-game goalie evaluation techniques introduced here, and on using that model to determine when a team would be better off with the backup in net.
