@@ -1,0 +1,1693 @@
+---
+title: "Using Win Probabilities to Optimize Goalie-Switching Decisions"
+author: "Ian Ferer"
+date: "2022-09-04"
+output:
+    html_document: default
+    pdf_document: default
+---
+
+<script src="{{< blogdown/postref >}}index_files/header-attrs/header-attrs.js"></script>
+<script src="{{< blogdown/postref >}}index_files/kePrint/kePrint.js"></script>
+<link href="{{< blogdown/postref >}}index_files/lightable/lightable.css" rel="stylesheet" />
+
+
+<div id="introduction" class="section level2">
+<h2>Introduction</h2>
+<p>If you haven’t read my previous posts <a href="https://www.ianferer.com/post/the-other-goalie-pull-decision/">motivating the idea of optimizing goalie decisions</a> and <a href="https://www.ianferer.com/post/a-theoretical-win-probability-model-for-goalie-evaluation/">developing a goalie-dependent win probability model</a> because they were too mathematical – good news! This post will be entirely focused on explaining how we can use the win probability model created in the previous post to inform decisions about when to pull the starting goalie, and involves minimal mathematics. You may have seen <a href="https://twitter.com/ianferer/status/1521315697552470018">this Twitter thread</a> where I posted a series of interesting decisions in the 2022 playoffs (interesting to me at least) with estimated win probability gains teams could see by switching to the backup goalie – this post is just going to be a more detailed explanation of how that “decision machine” (as I called it) works, and how to interpret the output and use it to inform decisions. Moreover, if someone creates a better decision rule for when to switch goalies than the one I’ve proposed, this will still serve as a brief overview of the general process of how to use decision rules in this way.</p>
+</div>
+<div id="example-win-probability-graphs" class="section level2">
+<h2>Example Win Probability Graphs</h2>
+<p>In the previous post, I generated some graphs for a few cherry-picked games as a way to visualize how the win probability model “looks” (for lack of a better term). In order to get an idea of how it looks as a way to analyze decisions, I’m going to plot them again, but this time I’ll add two lines to each plot: one representing the home team’s win probability at each time if the home backup replaced the home starter at that instant, and the other representing the away team’s win probability at each time if the away backup replaced the away starter at that instant. (We could also consider the home team’s win probability if <em>both</em> starters were replaced by backups at each time, but this would be an extremely rare occurrence and would not be a great way to analyze a decision.) It should be noted that these graphs are <em>not</em> the best thing to use as a decision rule – the recommended decisions should be apparent by the heights of the lines, but coaches would only ever consider switching goalies during stoppages in play, and they would only likely consider stoppages occurring because of goals or at the end of the period. For this reason, the changes in win probability at each instant aren’t of much use to someone making decisions, but these visualizations may still be interesting, especially for games that are particularly high-scoring or feature a short time-span with multiple goals by one team. As in the previous post, I’ll be using the full 2017-2018 regular season to compute priors for both save probabilities and shot-count distributions. I’ll again use the same prior for each goalie’s save probability (I used goalie-specific save probability priors for the playoff decision machine, but here I’m going to use the same priors I’ve been using in this series), and I’ll estimate team-specific priors for the shot-count distributions.</p>
+<div id="october-4-2018-washington-6-at-pittsburgh-7-ot" class="section level3">
+<h3>October 4, 2018: Washington 6 at Pittsburgh 7 (OT)</h3>
+<p>For over 90% of this game, <em>both</em> teams would have been better off pulling their respective starters, but somehow both Matt Murray and Braden Holtby were allowed to play the entire game. At one point during the game, Pittsburgh stood to gain an estimated 21.2% win probability by pulling Murray, and at a different point during the game, Washington stood to gain an estimated 19.3% win probability by pulling Holtby.</p>
+<p><img src="{{< blogdown/postref >}}index_files/figure-html/PIT-WSH%20Graph-1.png" width="672" /></p>
+</div>
+<div id="january-12-2019-ny-rangers-2-at-ny-islanders-1" class="section level3">
+<h3>January 12, 2019: NY Rangers 2 at NY Islanders 1</h3>
+<p>On the opposite extreme, this game featured two goalies having fairly strong games, so it shouldn’t be surprising that both teams would stand to lose a significant portion of their respective win probabilities by pulling their respective starters.</p>
+<p><img src="{{< blogdown/postref >}}index_files/figure-html/NYI-NYR%20Graph-1.png" width="672" /></p>
+</div>
+<div id="april-6-2019-vegas-2-at-los-angeles-5" class="section level3">
+<h3>April 6, 2019: Vegas 2 at Los Angeles 5</h3>
+<p>As for a more typical NHL game, early on both goalies start out strong, but after a few first period goals by Los Angeles, we can see that the home team’s win probability would decrease if the away team switched goalies (indicating that the away team’s win probability would increase if they switched goalies), while for most of the game the home team’s starter is giving them a far better chance to win than their backup would.</p>
+<p><img src="{{< blogdown/postref >}}index_files/figure-html/LAK-VGK%20Graph-1.png" width="672" /></p>
+</div>
+</div>
+<div id="decisions-in-the-2022-playoffs" class="section level2">
+<h2>Decisions in the 2022 Playoffs</h2>
+<p>As I mentioned above, I posted some example decisions on Twitter during the 2022 Playoffs. I limited my posts to decisions that I found interesting, which to me was any decision where the estimated win probability gain from switching goalies was large enough to at least make me think about switching goalies. Many of them may only be interesting to <em>me</em>, and in many cases I wouldn’t end up choosing to switch goalies, but the playoffs provide a good setting for testing the decision machine. We have a full regular season of relevant data from which to compute priors, and every coach should be making decisions that maximize their team’s win probability, as wins are the only thing that matters in the playoffs, unlike in the regular season where points earned are more important than wins. That said, a coach who manages his goalies like a bullpen in baseball and loses will take a significant amount of heat, so there is still an incentive to not make overly-risky decisions.</p>
+<p>A few of the games in the 2022 playoffs were particularly exciting, and they included a good amount of decisions that were particularly interesting. I’ll provide the output from the decision machine for those games below, along with some discussion about the boldest decisions in my opinion.</p>
+<p>However, before getting into some example playoff games, there are a few notes I want to make about the output below. The model I’m using for the decisions below is slightly different from the one I used in the graphs above, as the new model features goalie-specific priors (I’ll write a brief post evaluating the new model in the near future). Additionally, while a coach should be thinking about which goalie to have in net at all times during the game, I’m only going to analyze decisions using this model at the end of a period or whenever a goal is scored by either team (I’ll explain some of the reasoning behind this later on).</p>
+<div id="florida-panthers-vs.-washington-capitals-game-5" class="section level3">
+<h3>Florida Panthers vs. Washington Capitals, Game 5</h3>
+<p>With the series tied at 2 games apiece, this was a crucial game for both teams. However, for the beginning of the game, the Panthers didn’t seem to realize this, as they conceded a 3-0 lead to the Capitals less than 4 minutes into the second period, before eventually mounting a comeback and winning 5-3 to take a 3-2 series lead. While a 5-3 score may seem fairly standard, this game provides a good example of a rare occurrence where going against traditional thinking may be best when making goalie-pull decisions. The model output for this game is shown below. Note that win probabilities are expressed as probabilities between 0 and 1, so to get the associated percentage values simply multiply them by 100. Following the conventions from my first post, in the columns representing estimated win probability changes, a positive value (highlighted in yellow) means the team would be better off switching goalies, and a negative value (highlighted in purple) means the team would be better off sticking with their current goalie. Gray rows represent evaluations performed during intermissions.</p>
+<table class="table" style="margin-left: auto; margin-right: auto;">
+<thead>
+<tr>
+<th style="text-align:center;">
+Home
+</th>
+<th style="text-align:center;">
+Away
+</th>
+<th style="text-align:center;">
+Time
+</th>
+<th style="text-align:center;">
+Home Score
+</th>
+<th style="text-align:center;">
+Away Score
+</th>
+<th style="text-align:center;">
+Home Win Probability
+</th>
+<th style="text-align:center;">
+Away Win Probability
+</th>
+<th style="text-align:center;">
+Estimated Home WP Change
+</th>
+<th style="text-align:center;">
+Estimated Away WP Change
+</th>
+<th style="text-align:center;">
+Recommended Home Goalie
+</th>
+<th style="text-align:center;">
+Recommended Away Goalie
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center;">
+FLA
+</td>
+<td style="text-align:center;">
+WSH
+</td>
+<td style="text-align:center;">
+429
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.467
+</td>
+<td style="text-align:center;">
+0.533
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.029
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.020
+</td>
+<td style="text-align:center;">
+Knight
+</td>
+<td style="text-align:center;">
+Vanecek
+</td>
+</tr>
+<tr>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+FLA
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+WSH
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+1200
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+1
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.280
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.720
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.006
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.177
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Bobrovsky
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Samsonov
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+FLA
+</td>
+<td style="text-align:center;">
+WSH
+</td>
+<td style="text-align:center;">
+1333
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0.119
+</td>
+<td style="text-align:center;">
+0.881
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.018
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.168
+</td>
+<td style="text-align:center;">
+Knight
+</td>
+<td style="text-align:center;">
+Samsonov
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+FLA
+</td>
+<td style="text-align:center;">
+WSH
+</td>
+<td style="text-align:center;">
+1418
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.050
+</td>
+<td style="text-align:center;">
+0.950
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.019
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.114
+</td>
+<td style="text-align:center;">
+Knight
+</td>
+<td style="text-align:center;">
+Samsonov
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+FLA
+</td>
+<td style="text-align:center;">
+WSH
+</td>
+<td style="text-align:center;">
+1610
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.148
+</td>
+<td style="text-align:center;">
+0.852
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.033
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.101
+</td>
+<td style="text-align:center;">
+Knight
+</td>
+<td style="text-align:center;">
+Samsonov
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+FLA
+</td>
+<td style="text-align:center;">
+WSH
+</td>
+<td style="text-align:center;">
+1947
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.297
+</td>
+<td style="text-align:center;">
+0.703
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.037
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.065
+</td>
+<td style="text-align:center;">
+Knight
+</td>
+<td style="text-align:center;">
+Samsonov
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+FLA
+</td>
+<td style="text-align:center;">
+WSH
+</td>
+<td style="text-align:center;">
+2084
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.530
+</td>
+<td style="text-align:center;">
+0.470
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.042
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.000
+</td>
+<td style="text-align:center;">
+Knight
+</td>
+<td style="text-align:center;">
+Vanecek
+</td>
+</tr>
+<tr>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+FLA
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+WSH
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+2400
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+3
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+3
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.526
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.474
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.027
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.013
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Knight
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Samsonov
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+FLA
+</td>
+<td style="text-align:center;">
+WSH
+</td>
+<td style="text-align:center;">
+2584
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.778
+</td>
+<td style="text-align:center;">
+0.222
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.012
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.013
+</td>
+<td style="text-align:center;">
+Knight
+</td>
+<td style="text-align:center;">
+Vanecek
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+FLA
+</td>
+<td style="text-align:center;">
+WSH
+</td>
+<td style="text-align:center;">
+3355
+</td>
+<td style="text-align:center;">
+5
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.988
+</td>
+<td style="text-align:center;">
+0.012
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.002
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.000
+</td>
+<td style="text-align:center;">
+Bobrovsky
+</td>
+<td style="text-align:center;">
+Vanecek
+</td>
+</tr>
+</tbody>
+</table>
+<p>When the Capitals scored to make it 3-0, the decision machine recommended that the Panthers switch to Spencer Knight in net, with an estimated win probability gain of 1.9% associated with the switch. However, the Panthers didn’t switch to Knight, and instead began their comeback, which actually resulted in an <em>increase</em> in the estimated win probability gain from switching to Knight. This may not be intuitive, but think of it this way – when down 3-0, Knight was the better choice (according to this model), but the estimated win probability gain was so minimal because even with a better goalie, the Panthers are still down by 3 goals. As they begin to close the gap on the scoreboard, however, Knight is still the better choice, and the fact that the game is now tighter means that Knight provides a bigger boost to the Panthers’ win probability. In a way, the Panthers have more to lose by sticking with Bobrovsky during this comeback. Nevertheless, the Panthers never switched to Knight in this game, and they did eventually complete the comeback. However, this is a great example of a game where I believe a coach should be thinking about a goalie change after their team scores a goal. In reality, no coach would ever consider pulling a goalie under these circumstances (they would typically only do so after a goal against or after an intermission), but the output above should ideally get coaches to think differently about when to judge their goalies.</p>
+<p>Note also that the decision machine recommends Vanecek over Samsonov at the time of the Capitals’ first goal, despite the fact that Samsonov had not allowed any goals to that point – this is because the priors on the four goalies’ save probabilities are estimated using their regular-season starts, and Vanecek’s regular-season numbers were much better than Samsonov’s numbers. This serves as another reminder that these numbers without the proper context are not particularly useful, and ideally a coach would weigh the output of this model along with their subjective opinion about how their team’s two goalies have performed in the current game and in previous games.</p>
+</div>
+<div id="calgary-flames-vs.-edmonton-oilers-game-1" class="section level3">
+<h3>Calgary Flames vs. Edmonton Oilers, Game 1</h3>
+<p>The “Battle of Alberta” got off to a great start, with the Flames taking Game 1 9-6 over the Oilers. With that many goals, it shouldn’t come as a surprise that the game featured some bad goaltending and some interesting decisions by both coaches. The model output for this game is shown below.</p>
+<table class="table" style="margin-left: auto; margin-right: auto;">
+<thead>
+<tr>
+<th style="text-align:center;">
+Home
+</th>
+<th style="text-align:center;">
+Away
+</th>
+<th style="text-align:center;">
+Time
+</th>
+<th style="text-align:center;">
+Home Score
+</th>
+<th style="text-align:center;">
+Away Score
+</th>
+<th style="text-align:center;">
+Home Win Probability
+</th>
+<th style="text-align:center;">
+Away Win Probability
+</th>
+<th style="text-align:center;">
+Estimated Home WP Change
+</th>
+<th style="text-align:center;">
+Estimated Away WP Change
+</th>
+<th style="text-align:center;">
+Recommended Home Goalie
+</th>
+<th style="text-align:center;">
+Recommended Away Goalie
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+26
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+0.799
+</td>
+<td style="text-align:center;">
+0.201
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.027
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.091
+</td>
+<td style="text-align:center;">
+Markstrom
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+51
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+0.905
+</td>
+<td style="text-align:center;">
+0.095
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.016
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.111
+</td>
+<td style="text-align:center;">
+Markstrom
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+365
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+0.947
+</td>
+<td style="text-align:center;">
+0.053
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.025
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.055
+</td>
+<td style="text-align:center;">
+Markstrom
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+461
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.763
+</td>
+<td style="text-align:center;">
+0.237
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.004
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.114
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+CGY
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+EDM
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+1200
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+3
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+1
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.767
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.233
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.014
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.131
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Markstrom
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1245
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.886
+</td>
+<td style="text-align:center;">
+0.114
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.010
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.057
+</td>
+<td style="text-align:center;">
+Markstrom
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1570
+</td>
+<td style="text-align:center;">
+5
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.955
+</td>
+<td style="text-align:center;">
+0.045
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.009
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.022
+</td>
+<td style="text-align:center;">
+Markstrom
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1630
+</td>
+<td style="text-align:center;">
+5
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0.874
+</td>
+<td style="text-align:center;">
+0.126
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.024
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.059
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1704
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0.952
+</td>
+<td style="text-align:center;">
+0.048
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.005
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.019
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1778
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.877
+</td>
+<td style="text-align:center;">
+0.123
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.041
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.047
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+2046
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+0.763
+</td>
+<td style="text-align:center;">
+0.237
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.090
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.086
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+2361
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+5
+</td>
+<td style="text-align:center;">
+0.605
+</td>
+<td style="text-align:center;">
+0.395
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.128
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.130
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+CGY
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+EDM
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+2400
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+6
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+5
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.618
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.382
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.119
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.125
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Vladar
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+2488
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+0.387
+</td>
+<td style="text-align:center;">
+0.613
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.132
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.165
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+2577
+</td>
+<td style="text-align:center;">
+7
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+0.635
+</td>
+<td style="text-align:center;">
+0.365
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.133
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.097
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+2935
+</td>
+<td style="text-align:center;">
+8
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+0.887
+</td>
+<td style="text-align:center;">
+0.113
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.054
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.022
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+CGY
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+3469
+</td>
+<td style="text-align:center;">
+9
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+0.999
+</td>
+<td style="text-align:center;">
+0.001
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.000
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.000
+</td>
+<td style="text-align:center;">
+Vladar
+</td>
+<td style="text-align:center;">
+Smith
+</td>
+</tr>
+</tbody>
+</table>
+<p>One of the first things to note about this game is that Mike Smith was pulled <em>extremely</em> early. Calgary was up 2-0 by the end of the first <em>minute</em> of the game, with Smith giving up a goal on his first shot faced and 2 goals on his first 3 shots faced. While he managed to keep the puck out of the net for a few more minutes, he gave up his third goal on his tenth shot faced only 6 minutes into the game, prompting Jay Woodcroft to pull him for Mikko Koskinen. As shown in the table above, Edmonton could have gained 9.1% by pulling Smith after Calgary’s first goal or 11.1% by pulling Smith after Calgary’s second goal, but instead chose to leave Smith in the game. While Smith is notorious for being an extremely high-variance goalie, it’s hard to fault Woodcroft for not pulling Smith after only one or two goals, even with the large estimated win probability gains from this model. Nevertheless, Edmonton did eventually gain 5.5% in win probability by pulling Smith for Koskinen, so Woodcroft deserves some credit for making a change so early in the game. Also of interest regarding Edmonton’s goalies is that despite Koskinen giving up 5 goals by the end of the game (the ninth Calgary goal was an empty-net goal), at no point would Edmonton have been better off by going back to Smith. Despite Koskinen also having a relatively poor performance, he was still a better option than Smith. All things considered, I think Woodcroft made some smart decisions about his goalies in a game where his team lost 9-6.</p>
+<p>On the other hand, Darryl Sutter may have come away from this game with a win, but his process was not very sound according to this model. Despite the model suggesting that Jacob Markstrom should have been pulled after allowing 1 goal on 5 shots and after allowing 2 goals on 9 shots, Calgary was up 3-1 and 5-2 at both of those times, so again it’s hard to fault Sutter for sticking it out with Markstrom. However, when Edmonton began their comeback at the end of the second period, with Markstrom allowing his third, fourth, and fifth goals on only his 12th, 14th, and 17th shots faced, respectively, Sutter may have wanted to consider pulling Markstrom after any of those goals. In my subjective opinion, this is one of the best instances in which this model is particularly useful – your goalie is having a terrible game, and yet not only are you still in the game, but you have the lead! Sure, it’s the playoffs and Markstrom is the guy who got you to this point, but he is clearly not having a good game by his standards. At the very least, Sutter probably should have been strongly considering going to Vladar to start the third period (which would have provided an estimated win probability gain of 11.9%). However, Markstrom came out to start the third period, and less than two minutes into the period, Markstrom allowed his sixth goal of the night on his 20th shot faced, and just like that Calgary’s four-goal lead had been erased. The estimated win probability gain from going to Dan Vladar was up to 13.2%, which would have bumped Calgary’s then-current win probability of 38.7% over 50%. Yet somehow, Calgary and Markstrom managed to stop the Edmonton surge, breaking the tie shortly after and going on to win the game. To me, this feels like bad process leading to good results for Sutter and the Flames, but part of what makes the NHL playoffs so exciting is that only the end result matters. That said, Calgary did go on to lose the next four games, with Markstrom playing poorly in most of those games and Sutter never giving Vladar the net in relief. It’s unfair for me to suggest that Sutter’s refusal to pull Markstrom in Game 1 foretold bad things for Calgary (since one of the critical assumptions underlying this model is that all games are independent), but it seems as though Sutter’s conservative decision-making in Game 1 was a recurring habit through the remainder of the series that inevitably contributed to Calgary’s early elimination.</p>
+</div>
+<div id="colorado-avalanche-vs.-edmonton-oilers-game-1" class="section level3">
+<h3>Colorado Avalanche vs. Edmonton Oilers, Game 1</h3>
+<p>In the first game of their next series, Edmonton again found themselves in a shootout that was somehow only the 2nd-highest scoring game of the 2022 playoffs to that point (with their previous Game 1 having one more goal), eventually losing to Colorado by a score of 8-6.</p>
+<table class="table" style="margin-left: auto; margin-right: auto;">
+<thead>
+<tr>
+<th style="text-align:center;">
+Home
+</th>
+<th style="text-align:center;">
+Away
+</th>
+<th style="text-align:center;">
+Time
+</th>
+<th style="text-align:center;">
+Home Score
+</th>
+<th style="text-align:center;">
+Away Score
+</th>
+<th style="text-align:center;">
+Home Win Probability
+</th>
+<th style="text-align:center;">
+Away Win Probability
+</th>
+<th style="text-align:center;">
+Estimated Home WP Change
+</th>
+<th style="text-align:center;">
+Estimated Away WP Change
+</th>
+<th style="text-align:center;">
+Recommended Home Goalie
+</th>
+<th style="text-align:center;">
+Recommended Away Goalie
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+304
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.347
+</td>
+<td style="text-align:center;">
+0.653
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.055
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.039
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Smith
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+340
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.599
+</td>
+<td style="text-align:center;">
+0.401
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.068
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.108
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+910
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.679
+</td>
+<td style="text-align:center;">
+0.321
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.058
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.051
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1177
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0.494
+</td>
+<td style="text-align:center;">
+0.506
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.083
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.018
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1186
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0.695
+</td>
+<td style="text-align:center;">
+0.305
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.078
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.085
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+COL
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+EDM
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+1200
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+3
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+2
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.684
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.316
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.079
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.074
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Francouz
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1232
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0.821
+</td>
+<td style="text-align:center;">
+0.179
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.060
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.089
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1379
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.697
+</td>
+<td style="text-align:center;">
+0.303
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.091
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.098
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1478
+</td>
+<td style="text-align:center;">
+5
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.851
+</td>
+<td style="text-align:center;">
+0.149
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.045
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.091
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+1580
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.926
+</td>
+<td style="text-align:center;">
+0.074
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.027
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.062
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+2180
+</td>
+<td style="text-align:center;">
+7
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.983
+</td>
+<td style="text-align:center;">
+0.017
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.019
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.007
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+2211
+</td>
+<td style="text-align:center;">
+7
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+0.944
+</td>
+<td style="text-align:center;">
+0.056
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.023
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.020
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+COL
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+EDM
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+2400
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+7
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+4
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.963
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.037
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.028
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.014
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Francouz
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+2608
+</td>
+<td style="text-align:center;">
+7
+</td>
+<td style="text-align:center;">
+5
+</td>
+<td style="text-align:center;">
+0.897
+</td>
+<td style="text-align:center;">
+0.103
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.029
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.037
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+3156
+</td>
+<td style="text-align:center;">
+7
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+0.815
+</td>
+<td style="text-align:center;">
+0.185
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.012
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.047
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+COL
+</td>
+<td style="text-align:center;">
+EDM
+</td>
+<td style="text-align:center;">
+3578
+</td>
+<td style="text-align:center;">
+8
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+0.999
+</td>
+<td style="text-align:center;">
+0.001
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.000
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.001
+</td>
+<td style="text-align:center;">
+Francouz
+</td>
+<td style="text-align:center;">
+Koskinen
+</td>
+</tr>
+</tbody>
+</table>
+<p>Much like Game 1 of the Battle of Alberta, both teams faced some interesting decisions in this game. Edmonton opened the scoring early, scoring on only their second shot against Darcy Kuemper. However, Colorado answered back shortly after, on only their second shot against Mike Smith. After this point, both teams would have been better off switching goalies <em>at every evaluation point</em> until after Colorado’s sixth goal, when Edmonton finally pulled the trigger and pulled Smith in favor of Koskinen, and Pavel Francouz was forced into action because of an injury to Kuemper. While Smith allowing 6 goals before the end of the second period certainly looks bad, the Oilers were getting <em>heavily</em> outplayed by Colorado, so I don’t fault Jay Woodcroft too much for not pulling Smith early in the game. That said, even when you don’t think your goalie is to blame for most of the goals he’s allowed, it’s hard not to pull him when you’ve given up 5 goals on 22 shots in Game 1 of the Conference Finals. All things considered, I think this is a situation where the decision machine output doesn’t line up very well with a subjective opinion of Smith for the first 3 or 4 goals, but at some point a pull should become the obvious decision, even if it’s only to try and reverse the momentum of the game.</p>
+<p>On the other hand, Jared Bednar can also be forgiven for not pulling Darcy Kuemper, even though he certainly didn’t play well before his injury forced him out of the game. Kuemper allowed 1 goal on 2 shots, 2 goals on 8 shots, and 3 goals on 13 shots before eventually being removed from the game because of injury. In the majority of hockey games where your goalie performs this poorly, there’s no way he should be allowed to continue in the game, but luckily for Bednar and the Avalanche, their offense was firing on all cylinders and Kuemper’s poor performance never really put them in jeopardy. Francouz did allow 3 goals in relief of Kuemper, but by that point, the game was nearly over, and even with the decision machine not being aware of Kuemper being unavailable, the Avalanche were better off with Francouz anyway. Not only did Francouz outperform Kuemper in this game, but he also won the next 3 games in a row to sweep Edmonton en route to the Stanley Cup Final while Kuemper was out with injury.</p>
+</div>
+</div>
+<div id="conclusion" class="section level2">
+<h2>Conclusion</h2>
+<p>There are still a few more things to discuss about this project – such as creation of goalie-specific priors and whether using this model would actually improve a team’s record – and models can always be improved with new information and/or new methods, but this write-up essentially completes the basic framework for how we might be able to compute live goalie-dependent win probabilities and how to use them to improve the decision-making process behind when to pull the starting goalie. Again, I haven’t really evaluated the performance of this model all that much, and there’s almost certainly a better way to model this decision process, but at the very least this project series should inspire you to put a little bit more thought into an often-overlooked part of hockey.</p>
+</div>

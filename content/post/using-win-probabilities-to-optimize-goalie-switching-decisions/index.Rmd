@@ -1,0 +1,1100 @@
+---
+title: "Using Win Probabilities to Optimize Goalie-Switching Decisions"
+author: "Ian Ferer"
+date: "2022-09-04"
+output:
+    html_document: default
+    pdf_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+
+library(RCurl)
+library(xml2)
+library(rvest)
+library(jsonlite)
+library(foreach)
+library(lubridate)
+library(teamcolors)
+library(survival)
+library(survminer)
+library(knitr)
+library(gtsummary)
+library(kableExtra)
+library(MASS)
+library(fitdistrplus)
+library(pscl)
+library(lmtest)
+library(pROC)
+library(MLmetrics)
+library(gganimate)
+library(transformr)
+library(gifski)
+library(ggrepel)
+library(tidyverse)
+```
+
+## Introduction
+
+```{r Data, echo = FALSE}
+beta.mom <- function(m, v) {
+    # m = sample mean
+    # v = sample variance
+    # return (a.hat, b.hat), the method-of-moments estimators of the beta distribution
+    a.hat <- m * (((1 - m) / v) - 1)
+    b.hat <- (1 - m) * (((1 - m) / v) - 1)
+    return(c(a.hat, b.hat))
+}
+
+nbinom.mom <- function(m, v) {
+    # m = sample mean
+    # v = sample variance
+    # return (p.hat, r.hat), the method-of-moments estimators of the negative binomial distribution
+    p.hat <- m / v
+    r.hat <- (m^2) /  (v - m)
+    return(c(p.hat, r.hat))
+}
+
+team.replace <- function(team.code) {
+    # team.code = vector of 3-letter team codes
+    # return vector replacing LAK, NJD, SJS, and TBL with L.A, N.J, S.J, and T.B
+    new.code <- ifelse(team.code == "LAK", "L.A",
+                       ifelse(team.code == "NJD", "N.J",
+                              ifelse(team.code == "SJS", "S.J",
+                                     ifelse(team.code == "TBL", "T.B", team.code))))
+    return(new.code)
+}
+
+# read in shot data
+all.shots <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/shots_2007_2020.csv",
+                      stringsAsFactors = FALSE)
+shots.2021 <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/shots_2021.csv",
+                       stringsAsFactors = FALSE)
+all.shots <- rbind(all.shots, shots.2021)
+
+shot.events <- c("SHOT", "GOAL")
+
+# read in game-level data
+games <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/games_2007_2021.csv",
+                  stringsAsFactors = FALSE)
+
+# read in team colors
+team.colors <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/team_colors.csv",
+                        stringsAsFactors = FALSE)
+team.colors.2 <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/team_colors_2.csv",
+                          stringsAsFactors = FALSE)
+
+t.color <- team.colors$color
+names(t.color) <- team.colors$team
+
+team.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = teamCode,
+           opponent = ifelse(teamCode == homeTeamCode,
+                             awayTeamCode,
+                             homeTeamCode),
+           home = ifelse(teamCode == homeTeamCode,
+                         "Home",
+                         "Away")) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(shots = n(),
+              goals = sum(event == "GOAL"))
+
+goalie.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = ifelse(teamCode == homeTeamCode,
+                         awayTeamCode,
+                         homeTeamCode),
+           opponent = teamCode,
+           home = ifelse(teamCode == homeTeamCode,
+                         "Away",
+                         "Home"),
+           shot.goalie = goalieNameForShot) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(starter = first(shot.goalie[shot.goalie != ""]),
+              st.shots.against = sum(shot.goalie != "" &
+                                         shot.goalie == first(shot.goalie[shot.goalie != ""])),
+              st.goals.against = sum(shot.goalie != "" &
+                                         shot.goalie == first(shot.goalie[shot.goalie != ""]) &
+                                         event == "GOAL")) %>%
+    mutate(st.svp = 1 - (st.goals.against / st.shots.against),
+           st.svp.adj = (st.shots.against - st.goals.against + 1) / (st.shots.against + 2),
+           rbs = as.numeric(st.svp <= 0.85))
+
+game.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = teamCode,
+           opponent = ifelse(teamCode == homeTeamCode,
+                             awayTeamCode,
+                             homeTeamCode),
+           home = ifelse(teamCode == homeTeamCode,
+                         "Home",
+                         "Away"),
+           win = ifelse(teamCode == homeTeamCode,
+                        homeTeamWon,
+                        1 - homeTeamWon)) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(win = mean(win))
+
+game.date <- games %>%
+    filter(season >= 2014) %>%
+    filter(playoffGame == 0) %>%
+    mutate(game_id = gameId %% 1e5,
+           opponent = opposingTeam,
+           home = ifelse(home_or_away == "HOME",
+                         "Home",
+                         "Away"),
+           date = ymd(gameDate)) %>%
+    group_by(season, game_id, team, opponent, home, date) %>%
+    summarise()
+
+shot.data <- game.date %>%
+    inner_join(team.info) %>%
+    inner_join(goalie.info) %>%
+    inner_join(game.info) %>%
+    ungroup() %>%
+    mutate(team = as.factor(team),
+           opponent = as.factor(opponent),
+           home = as.factor(home)) %>%
+    filter(shots >= 10)
+```
+
+If you haven't read my previous posts [motivating the idea of optimizing goalie decisions](<https://www.ianferer.com/post/the-other-goalie-pull-decision/>) and [developing a goalie-dependent win probability model](<https://www.ianferer.com/post/a-theoretical-win-probability-model-for-goalie-evaluation/>) because they were too mathematical -- good news! This post will be entirely focused on explaining how we can use the win probability model created in the previous post to inform decisions about when to pull the starting goalie, and involves minimal mathematics. You may have seen [this Twitter thread](<https://twitter.com/ianferer/status/1521315697552470018>) where I posted a series of interesting decisions in the 2022 playoffs (interesting to me at least) with estimated win probability gains teams could see by switching to the backup goalie -- this post is just going to be a more detailed explanation of how that "decision machine" (as I called it) works, and how to interpret the output and use it to inform decisions. Moreover, if someone creates a better decision rule for when to switch goalies than the one I've proposed, this will still serve as a brief overview of the general process of how to use decision rules in this way.
+
+## Example Win Probability Graphs
+
+```{r WP Setup, echo = FALSE}
+s.prob.score.k <- function(k, A, B, r, p) {
+    # k = number of goals scored
+    # A, B = save percentage prior encoding
+    # r, p = negative binomial distribution parameters
+    m <- k:100
+    Q <- choose(m, k) * choose(m + r - 1, m) * (1/beta(A, B)) * beta(A + k, B + m - k) * (p^r) * ((1 - p)^m)
+    return(sum(Q))
+}
+
+s.win.prob.k <- function(k1, k2, A1, B1, p1, g1, s1, A2, B2, p2, g2, s2, t, r, d) {
+    # k1 = number of goals by home team
+    # k2 = number of goals by away team
+    # A1, B1 = save percentage prior encoding of home team
+    # p1 = NB prob. parameter of home team
+    # g1 = goals allowed by home team up to time t
+    # s1 = saves made by home team up to time t
+    # A2, B2 = save percentage prior encoding of away team
+    # p2 = NB prob. parameter of away team
+    # g2 = goals allowed by away team up to time t
+    # s2 = saves made by away team up to time t
+    # r = NB shape parameter estimate
+    # t = seconds remaining in regulation
+    # d = current score differential (from perspective of home team)
+    prob.adj <- ifelse(k1 - k2 > -d, 1, 1/2)
+    home.comp <- s.prob.score.k(k1, A2 + g2, B2 + s2, t*r, p1)
+    away.comp <- s.prob.score.k(k2, A1 + g1, B1 + s1, t*r, p2)
+    return(prob.adj * home.comp * away.comp)
+}
+
+s.win.prob.t <- function(A1, B1, p1, g1, s1, A2, B2, p2, g2, s2, t, r, d) {
+    # choose upper bound on K (K.max) by finding minimum n such that P(score at most n) >= 0.99
+    N <- seq(0, 100, by = 1)
+    prob.k1 <- sapply(N, function(x) s.prob.score.k(x, A2 + g2, B2 + s2, t*r, p1))
+    prob.k2 <- sapply(N, function(x) s.prob.score.k(x, A1 + g1, B1 + s1, t*r, p2))
+    c.prob.k1 <- sapply(1:length(prob.k1), function(x) sum(prob.k1[1:x]))
+    c.prob.k2 <- sapply(1:length(prob.k2), function(x) sum(prob.k2[1:x]))
+    K1.max <- N[min(which(c.prob.k1 >= 0.999))]
+    K2.max <- N[min(which(c.prob.k2 >= 0.999))]
+    K1 <- rep(seq(0, K1.max, by = 1), rep(K2.max + 1, K1.max + 1))
+    K2 <- rep(seq(0, K2.max, by = 1), K1.max + 1)
+    K <- cbind(K1, K2) %>% as.data.frame() %>% filter(K1 - K2 >= -d)
+    W <- apply(K, MARGIN = 1, function(x) s.win.prob.k(x[1], x[2], A1, B1, p1, g1, s1, A2, B2, p2, g2, s2, t, r, d))
+    return(sum(W))
+}
+
+game.all.times <- all.shots %>%
+    filter(season == 2018) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(home.team = homeTeamCode,
+           away.team = awayTeamCode) %>%
+    group_by(season, game_id, home.team, away.team) %>%
+    expand(time = 0:3600) %>%
+    mutate(time.left = 3600 - time)
+
+game.shot.times <- all.shots %>%
+    filter(season == 2018) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(home.team = homeTeamCode,
+           away.team = awayTeamCode,
+           home.goal = as.numeric(event == "GOAL" & teamCode == home.team),
+           away.goal = as.numeric(event == "GOAL" & teamCode == away.team),
+           home.shot = as.numeric(teamCode == home.team),
+           away.shot = as.numeric(teamCode == away.team)) %>%
+    group_by(season, game_id, home.team, away.team, time) %>%
+    summarise(home.goal = sum(home.goal),
+              away.goal = sum(away.goal),
+              home.shot = sum(home.shot),
+              away.shot = sum(away.shot),
+              home.win = mean(homeTeamWon)) %>%
+    summarise(time = time,
+              home.goals = cumsum(home.goal),
+              away.goals = cumsum(away.goal),
+              home.shots = cumsum(home.shot),
+              away.shots = cumsum(away.shot),
+              home.win = home.win)
+
+prior.shots <- filter(shot.data, season == 2017)
+nb.fit <- glm.nb(shots ~ team + home, data = prior.shots)
+
+svp <- prior.shots$st.svp.adj
+beta.params <- beta.mom(mean(svp), var(svp))
+beta.mle <- fitdistr(svp, "beta", start = list(shape1 = beta.params[1], shape2 = beta.params[2]),
+                     lower = c(0, 0))
+svp.A <- beta.mle$estimate[2]
+svp.B <- beta.mle$estimate[1]
+
+A1 <- svp.A
+A2 <- svp.A
+B1 <- svp.B
+B2 <- svp.B
+```
+
+In the previous post, I generated some graphs for a few cherry-picked games as a way to visualize how the win probability model "looks" (for lack of a better term). In order to get an idea of how it looks as a way to analyze decisions, I'm going to plot them again, but this time I'll add two lines to each plot: one representing the home team's win probability at each time if the home backup replaced the home starter at that instant, and the other representing the away team's win probability at each time if the away backup replaced the away starter at that instant. (We could also consider the home team's win probability if *both* starters were replaced by backups at each time, but this would be an extremely rare occurrence and would not be a great way to analyze a decision.) It should be noted that these graphs are *not* the best thing to use as a decision rule -- the recommended decisions should be apparent by the heights of the lines, but coaches would only ever consider switching goalies during stoppages in play, and they would only likely consider stoppages occurring because of goals or at the end of the period. For this reason, the changes in win probability at each instant aren't of much use to someone making decisions, but these visualizations may still be interesting, especially for games that are particularly high-scoring or feature a short time-span with multiple goals by one team. As in the previous post, I'll be using the full 2017-2018 regular season to compute priors for both save probabilities and shot-count distributions. I'll again use the same prior for each goalie's save probability (I used goalie-specific save probability priors for the playoff decision machine, but here I'm going to use the same priors I've been using in this series), and I'll estimate team-specific priors for the shot-count distributions.
+
+### October 4, 2018: Washington 6 at Pittsburgh 7 (OT)
+
+```{r PIT-WSH, echo = FALSE}
+game.id <- (2e4) + 7
+pit.wsh.all <- filter(game.all.times, game_id == game.id)
+pit.wsh.shots <- filter(game.shot.times, game_id == game.id)
+
+game.score <- pit.wsh.all %>%
+    left_join(pit.wsh.shots) %>%
+    mutate(home.goals = na.locf(home.goals, na.rm = FALSE),
+           away.goals = na.locf(away.goals, na.rm = FALSE),
+           home.shots = na.locf(home.shots, na.rm = FALSE),
+           away.shots = na.locf(away.shots, na.rm = FALSE),
+           home.goals = replace(home.goals, is.na(home.goals), 0),
+           away.goals = replace(away.goals, is.na(away.goals), 0),
+           home.shots = replace(home.shots, is.na(home.shots), 0),
+           away.shots = replace(away.shots, is.na(away.shots), 0),
+           home.win = na.locf(na.locf(home.win, na.rm = FALSE), fromLast = TRUE)) %>%
+    mutate(period = ifelse(time <= 1200, 1, ifelse(time <= 2400, 2, 3))) %>%
+    relocate(period, .before = time) %>%
+    ungroup() %>%
+    group_by(season, game_id, home.team, away.team, period) %>%
+    mutate(d.score = home.goals - away.goals) %>%
+    ungroup() %>%
+    group_by(season, game_id) %>%
+    left_join(game.date %>%
+                  ungroup() %>%
+                  group_by(season, game_id) %>%
+                  summarise(game.date = first(date))) %>%
+    relocate(game.date, .after = game_id) %>%
+    relocate(home.win, .after = away.team) %>%
+    mutate(period = as.factor(paste("Period", period))) %>%
+    group_by(season, game_id, game.date, period, time)
+
+home <- as.factor(c("Home", "Away"))
+team <- factor(c(unique(game.score$home.team), unique(game.score$away.team)), levels = levels(shot.data$team))
+
+r <- nb.fit$theta
+p <- predict(nb.fit, data.frame(team = team, home = home), type = "response")
+
+p <- r / (r + p)
+r <- r/60
+
+s.win.prob <- apply(game.score, MARGIN = 1,
+                    function(x) s.win.prob.t(A1, B1, p[1], as.numeric(x[11]),
+                                             as.numeric(x[13]) - as.numeric(x[11]),
+                                             A2, B2, p[2], as.numeric(x[10]),
+                                             as.numeric(x[12]) - as.numeric(x[10]),
+                                             as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+s.win.prob.back.1 <- apply(game.score, MARGIN = 1,
+                           function(x) s.win.prob.t(A1, B1, p[1], 0, 0,
+                                                    A2, B2, p[2], as.numeric(x[10]),
+                                                    as.numeric(x[12]) - as.numeric(x[10]),
+                                                    as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+s.win.prob.back.2 <- apply(game.score, MARGIN = 1,
+                           function(x) s.win.prob.t(A1, B1, p[1], as.numeric(x[11]),
+                                                    as.numeric(x[13]) - as.numeric(x[11]),
+                                                    A2, B2, p[2], 0, 0,
+                                                    as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+wp.adj <- s.win.prob - 0.50
+wp.back.1.adj <- s.win.prob.back.1 - 0.50
+wp.back.2.adj <- s.win.prob.back.2 - 0.50
+
+game.score <- cbind(game.score,
+                    win.prob = wp.adj,
+                    win.prob.back.1 = wp.back.1.adj,
+                    win.prob.back.2 = wp.back.2.adj)
+```
+
+For over 90% of this game, *both* teams would have been better off pulling their respective starters, but somehow both Matt Murray and Braden Holtby were allowed to play the entire game. At one point during the game, Pittsburgh stood to gain an estimated `r 100 * round(max(wp.back.1.adj - wp.adj), 3)`% win probability by pulling Murray, and at a different point during the game, Washington stood to gain an estimated `r 100 * round(max(wp.adj - wp.back.2.adj), 3)`% win probability by pulling Holtby.
+
+```{r PIT-WSH Graph, echo = FALSE}
+ggplot(game.score, aes(x = time.left, y = win.prob)) +
+    geom_vline(xintercept = seq(2400, 0, by = -1200), alpha = 0.3, lty = 2, size = 1.1) +
+    geom_hline(yintercept = 0, alpha = 1, lty = 2, size = 1.1) +
+    geom_area(aes(x = time.left, y =  ifelse(win.prob >= 0, win.prob, 0)),
+              alpha = 0.4, fill = as.character(t.color[team[1]])) +
+    geom_area(aes(x = time.left, y =  ifelse(win.prob < 0, win.prob, 0)),
+              alpha = 0.4, fill = as.character(t.color[team[2]])) +
+    geom_line(data = gather(game.score, key = wp.type, value = wp,
+                            c("win.prob", "win.prob.back.1", "win.prob.back.2")),
+              aes(x = time.left, y = wp, color = wp.type),
+              size = 1.1) +
+    scale_color_manual(values = c("black", "red", "blue"),
+                       labels = c("Both Starters", "Home Backup", "Away Backup")) +
+    annotate(geom = "label", x = 3200, y = 0.40, label = team.colors.2$abbr[team[1]],
+             color = team.colors.2$p.color[team[1]],
+             fill = team.colors.2$s.color[team[1]],
+             size = 10,
+             label.padding = unit(0.42, "lines"),
+             label.size = NA) +
+    annotate(geom = "label", x = 3200, y = -0.40, label = team.colors.2$abbr[team[2]],
+             color = team.colors.2$p.color[team[2]],
+             fill = team.colors.2$s.color[team[2]],
+             size = 10,
+             label.padding = unit(0.42, "lines"),
+             label.size = NA) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = "Seconds Remaining",
+         y = "Home Team Win Probability",
+         title = "NHL Win Probability",
+         subtitle = paste(last(game.score$game.date), "--",
+                          team.colors$abbr[team[1]], last(game.score$home.goals), "vs.",
+                          team.colors$abbr[team[2]], last(game.score$away.goals)),
+         color = "Goalies",
+         caption = "Data via MoneyPuck.com") +
+    scale_x_reverse(breaks = seq(3600, 0, by = -600)) +
+    scale_y_continuous(labels = function(y) y + 0.5, limits = c(-0.5, 0.5))
+```
+
+### January 12, 2019: NY Rangers 2 at NY Islanders 1
+
+```{r NYI-NYR, echo = FALSE}
+game.id <- (2e4) + 688
+nyi.nyr.all <- filter(game.all.times, game_id == game.id)
+nyi.nyr.shots <- filter(game.shot.times, game_id == game.id)
+
+game.score <- nyi.nyr.all %>%
+    left_join(nyi.nyr.shots) %>%
+    mutate(home.goals = na.locf(home.goals, na.rm = FALSE),
+           away.goals = na.locf(away.goals, na.rm = FALSE),
+           home.shots = na.locf(home.shots, na.rm = FALSE),
+           away.shots = na.locf(away.shots, na.rm = FALSE),
+           home.goals = replace(home.goals, is.na(home.goals), 0),
+           away.goals = replace(away.goals, is.na(away.goals), 0),
+           home.shots = replace(home.shots, is.na(home.shots), 0),
+           away.shots = replace(away.shots, is.na(away.shots), 0),
+           home.win = na.locf(na.locf(home.win, na.rm = FALSE), fromLast = TRUE)) %>%
+    mutate(period = ifelse(time <= 1200, 1, ifelse(time <= 2400, 2, 3))) %>%
+    relocate(period, .before = time) %>%
+    ungroup() %>%
+    group_by(season, game_id, home.team, away.team, period) %>%
+    mutate(d.score = home.goals - away.goals) %>%
+    ungroup() %>%
+    group_by(season, game_id) %>%
+    left_join(game.date %>%
+                  ungroup() %>%
+                  group_by(season, game_id) %>%
+                  summarise(game.date = first(date))) %>%
+    relocate(game.date, .after = game_id) %>%
+    relocate(home.win, .after = away.team) %>%
+    mutate(period = as.factor(paste("Period", period))) %>%
+    group_by(season, game_id, game.date, period, time)
+
+home <- as.factor(c("Home", "Away"))
+team <- factor(c(unique(game.score$home.team), unique(game.score$away.team)), levels = levels(shot.data$team))
+
+r <- nb.fit$theta
+p <- predict(nb.fit, data.frame(team = team, home = home), type = "response")
+
+p <- r / (r + p)
+r <- r/60
+
+s.win.prob <- apply(game.score, MARGIN = 1,
+                    function(x) s.win.prob.t(A1, B1, p[1], as.numeric(x[11]),
+                                             as.numeric(x[13]) - as.numeric(x[11]),
+                                             A2, B2, p[2], as.numeric(x[10]),
+                                             as.numeric(x[12]) - as.numeric(x[10]),
+                                             as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+s.win.prob.back.1 <- apply(game.score, MARGIN = 1,
+                           function(x) s.win.prob.t(A1, B1, p[1], 0, 0,
+                                                    A2, B2, p[2], as.numeric(x[10]),
+                                                    as.numeric(x[12]) - as.numeric(x[10]),
+                                                    as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+s.win.prob.back.2 <- apply(game.score, MARGIN = 1,
+                           function(x) s.win.prob.t(A1, B1, p[1], as.numeric(x[11]),
+                                                    as.numeric(x[13]) - as.numeric(x[11]),
+                                                    A2, B2, p[2], 0, 0,
+                                                    as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+wp.adj <- s.win.prob - 0.50
+wp.back.1.adj <- s.win.prob.back.1 - 0.50
+wp.back.2.adj <- s.win.prob.back.2 - 0.50
+
+game.score <- cbind(game.score,
+                    win.prob = wp.adj,
+                    win.prob.back.1 = wp.back.1.adj,
+                    win.prob.back.2 = wp.back.2.adj)
+```
+
+On the opposite extreme, this game featured two goalies having fairly strong games, so it shouldn't be surprising that both teams would stand to lose a significant portion of their respective win probabilities by pulling their respective starters.
+
+```{r NYI-NYR Graph, echo = FALSE}
+ggplot(game.score, aes(x = time.left, y = win.prob)) +
+    geom_vline(xintercept = seq(2400, 0, by = -1200), alpha = 0.3, lty = 2, size = 1.1) +
+    geom_hline(yintercept = 0, alpha = 1, lty = 2, size = 1.1) +
+    geom_area(aes(x = time.left, y =  ifelse(win.prob >= 0, win.prob, 0)),
+              alpha = 0.4, fill = as.character(t.color[team[1]])) +
+    geom_area(aes(x = time.left, y =  ifelse(win.prob < 0, win.prob, 0)),
+              alpha = 0.4, fill = as.character(t.color[team[2]])) +
+    geom_line(data = gather(game.score, key = wp.type, value = wp,
+                            c("win.prob", "win.prob.back.1", "win.prob.back.2")),
+              aes(x = time.left, y = wp, color = wp.type),
+              size = 1.1) +
+    scale_color_manual(values = c("black", "red", "blue"),
+                       labels = c("Both Starters", "Home Backup", "Away Backup")) +
+    annotate(geom = "label", x = 3200, y = 0.40, label = team.colors.2$abbr[team[1]],
+             color = team.colors.2$p.color[team[1]],
+             fill = team.colors.2$s.color[team[1]],
+             size = 10,
+             label.padding = unit(0.42, "lines"),
+             label.size = NA) +
+    annotate(geom = "label", x = 3200, y = -0.40, label = team.colors.2$abbr[team[2]],
+             color = team.colors.2$p.color[team[2]],
+             fill = team.colors.2$s.color[team[2]],
+             size = 10,
+             label.padding = unit(0.42, "lines"),
+             label.size = NA) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = "Seconds Remaining",
+         y = "Home Team Win Probability",
+         title = "NHL Win Probability",
+         subtitle = paste(last(game.score$game.date), "--",
+                          team.colors$abbr[team[1]], last(game.score$home.goals), "vs.",
+                          team.colors$abbr[team[2]], last(game.score$away.goals)),
+         color = "Goalies",
+         caption = "Data via MoneyPuck.com") +
+    scale_x_reverse(breaks = seq(3600, 0, by = -600)) +
+    scale_y_continuous(labels = function(y) y + 0.5, limits = c(-0.5, 0.5))
+```
+
+### April 6, 2019: Vegas 2 at Los Angeles 5
+
+```{r LAK-VGK, echo = FALSE}
+game.id <- (2e4) + 1270
+lak.vgk.all <- filter(game.all.times, game_id == game.id)
+lak.vgk.shots <- filter(game.shot.times, game_id == game.id)
+
+game.score <- lak.vgk.all %>%
+    left_join(lak.vgk.shots) %>%
+    mutate(home.goals = na.locf(home.goals, na.rm = FALSE),
+           away.goals = na.locf(away.goals, na.rm = FALSE),
+           home.shots = na.locf(home.shots, na.rm = FALSE),
+           away.shots = na.locf(away.shots, na.rm = FALSE),
+           home.goals = replace(home.goals, is.na(home.goals), 0),
+           away.goals = replace(away.goals, is.na(away.goals), 0),
+           home.shots = replace(home.shots, is.na(home.shots), 0),
+           away.shots = replace(away.shots, is.na(away.shots), 0),
+           home.win = na.locf(na.locf(home.win, na.rm = FALSE), fromLast = TRUE)) %>%
+    mutate(period = ifelse(time <= 1200, 1, ifelse(time <= 2400, 2, 3))) %>%
+    relocate(period, .before = time) %>%
+    ungroup() %>%
+    group_by(season, game_id, home.team, away.team, period) %>%
+    mutate(d.score = home.goals - away.goals) %>%
+    ungroup() %>%
+    group_by(season, game_id) %>%
+    left_join(game.date %>%
+                  ungroup() %>%
+                  group_by(season, game_id) %>%
+                  summarise(game.date = first(date))) %>%
+    relocate(game.date, .after = game_id) %>%
+    relocate(home.win, .after = away.team) %>%
+    mutate(period = as.factor(paste("Period", period))) %>%
+    group_by(season, game_id, game.date, period, time)
+
+home <- as.factor(c("Home", "Away"))
+team <- factor(c(unique(game.score$home.team), unique(game.score$away.team)), levels = levels(shot.data$team))
+
+r <- nb.fit$theta
+p <- predict(nb.fit, data.frame(team = team, home = home), type = "response")
+
+p <- r / (r + p)
+r <- r/60
+
+s.win.prob <- apply(game.score, MARGIN = 1,
+                    function(x) s.win.prob.t(A1, B1, p[1], as.numeric(x[11]),
+                                             as.numeric(x[13]) - as.numeric(x[11]),
+                                             A2, B2, p[2], as.numeric(x[10]),
+                                             as.numeric(x[12]) - as.numeric(x[10]),
+                                             as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+s.win.prob.back.1 <- apply(game.score, MARGIN = 1,
+                           function(x) s.win.prob.t(A1, B1, p[1], 0, 0,
+                                                    A2, B2, p[2], as.numeric(x[10]),
+                                                    as.numeric(x[12]) - as.numeric(x[10]),
+                                                    as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+s.win.prob.back.2 <- apply(game.score, MARGIN = 1,
+                           function(x) s.win.prob.t(A1, B1, p[1], as.numeric(x[11]),
+                                                    as.numeric(x[13]) - as.numeric(x[11]),
+                                                    A2, B2, p[2], 0, 0,
+                                                    as.numeric(x[9])/60, r, as.numeric(x[14])))
+
+wp.adj <- s.win.prob - 0.50
+wp.back.1.adj <- s.win.prob.back.1 - 0.50
+wp.back.2.adj <- s.win.prob.back.2 - 0.50
+
+game.score <- cbind(game.score,
+                    win.prob = wp.adj,
+                    win.prob.back.1 = wp.back.1.adj,
+                    win.prob.back.2 = wp.back.2.adj)
+```
+
+As for a more typical NHL game, early on both goalies start out strong, but after a few first period goals by Los Angeles, we can see that the home team's win probability would decrease if the away team switched goalies (indicating that the away team's win probability would increase if they switched goalies), while for most of the game the home team's starter is giving them a far better chance to win than their backup would.
+
+```{r LAK-VGK Graph, echo = FALSE}
+ggplot(game.score, aes(x = time.left, y = win.prob)) +
+    geom_vline(xintercept = seq(2400, 0, by = -1200), alpha = 0.3, lty = 2, size = 1.1) +
+    geom_hline(yintercept = 0, alpha = 1, lty = 2, size = 1.1) +
+    geom_area(aes(x = time.left, y =  ifelse(win.prob >= 0, win.prob, 0)),
+              alpha = 0.4, fill = as.character(t.color[team[1]])) +
+    geom_area(aes(x = time.left, y =  ifelse(win.prob < 0, win.prob, 0)),
+              alpha = 0.4, fill = as.character(t.color[team[2]])) +
+    geom_line(data = gather(game.score, key = wp.type, value = wp,
+                            c("win.prob", "win.prob.back.1", "win.prob.back.2")),
+              aes(x = time.left, y = wp, color = wp.type),
+              size = 1.1) +
+    scale_color_manual(values = c("black", "red", "blue"),
+                       labels = c("Both Starters", "Home Backup", "Away Backup")) +
+    annotate(geom = "label", x = 3200, y = 0.40, label = team.colors.2$abbr[team[1]],
+             color = team.colors.2$p.color[team[1]],
+             fill = team.colors.2$s.color[team[1]],
+             size = 10,
+             label.padding = unit(0.42, "lines"),
+             label.size = NA) +
+    annotate(geom = "label", x = 3200, y = -0.40, label = team.colors.2$abbr[team[2]],
+             color = team.colors.2$p.color[team[2]],
+             fill = team.colors.2$s.color[team[2]],
+             size = 10,
+             label.padding = unit(0.42, "lines"),
+             label.size = NA) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = "Seconds Remaining",
+         y = "Home Team Win Probability",
+         title = "NHL Win Probability",
+         subtitle = paste(last(game.score$game.date), "--",
+                          team.colors$abbr[team[1]], last(game.score$home.goals), "vs.",
+                          team.colors$abbr[team[2]], last(game.score$away.goals)),
+         color = "Goalies",
+         caption = "Data via MoneyPuck.com") +
+    scale_x_reverse(breaks = seq(3600, 0, by = -600)) +
+    scale_y_continuous(labels = function(y) y + 0.5, limits = c(-0.5, 0.5))
+```
+
+## Decisions in the 2022 Playoffs
+
+```{r Live Evaluation Setup, echo = FALSE}
+team.replace <- function(team.code) {
+    # team.code = vector of 3-letter team codes
+    # return vector replacing LAK, NJD, SJS, and TBL with L.A, N.J, S.J, and T.B
+    new.code <- ifelse(team.code == "LAK", "L.A",
+                       ifelse(team.code == "NJD", "N.J",
+                              ifelse(team.code == "SJS", "S.J",
+                                     ifelse(team.code == "TBL", "T.B", team.code))))
+    return(new.code)
+}
+
+get.goalie.prior <- function(g.name, t.name, prior.shots) {
+    # g.name = goalie name
+    # prior.shots = data frame of games used for prior
+    goalie.starts <- prior.shots %>% filter(starter == g.name)
+    if (nrow(goalie.starts) <= 5) {
+        goalie.starts <- prior.shots %>% filter(team == t.name)
+    }
+    
+    svp <- goalie.starts$st.svp.adj
+    beta.params <- beta.mom(mean(svp), var(svp))
+    beta.mle <- fitdistr(svp, "beta", start = list(shape1 = beta.params[1], shape2 = beta.params[2]),
+                         lower = c(0, 0))
+    svp.A <- beta.mle$estimate[2]
+    svp.B <- beta.mle$estimate[1]
+    
+    return(unname(c(svp.A, svp.B)))
+}
+
+get.eval.times <- function(g.json, act.goalies, prior.shots) {
+    # g.json = JSON file for a given game
+    # return data frame of information at goalie evaluation times (period ends and all goals)
+    
+    # basic game information
+    g.id <- g.json[["gameData"]][["game"]][["pk"]]
+    season <- g.id %/% (1e6)
+    game.id <- g.id %% (1e6)
+    h.team <- g.json[["gameData"]][["teams"]][["home"]][["triCode"]]
+    a.team <- g.json[["gameData"]][["teams"]][["away"]][["triCode"]]
+    
+    # get projected starters (in case current goalie has not faced any shots yet)
+    prior.gp <- apply(act.goalies, MARGIN = 1,
+                      function(x) nrow(filter(prior.shots, starter == x["goalie"])))
+    proj.starter.h <- ifelse(prior.gp[1] >= prior.gp[2],
+                             as.character(act.goalies["goalie"][1,]),
+                             as.character(act.goalies["goalie"][2,]))
+    proj.starter.a <- ifelse(prior.gp[3] >= prior.gp[4],
+                             as.character(act.goalies["goalie"][3,]),
+                             as.character(act.goalies["goalie"][4,]))
+    
+    # get goalie for each event
+    event.players <- g.json[["liveData"]][["plays"]][["allPlays"]][["players"]]
+    event.goalie <- lapply(event.players,
+                           function(x) ifelse(length(x[["player"]][["fullName"]][x[["playerType"]] == "Goalie"]),
+                                              x[["player"]][["fullName"]][x[["playerType"]] == "Goalie"],
+                                              NA)) %>%
+        unlist() %>%
+        unname()
+    
+    event.team <- g.json[["liveData"]][["plays"]][["allPlays"]][["team"]][["triCode"]]
+    
+    h.goalie <- ifelse(event.team == a.team, event.goalie, NA) %>%
+        na.locf(na.rm = FALSE) %>%
+        na.locf(na.rm = FALSE, fromLast = TRUE)
+    h.goalie <- ifelse(is.na(h.goalie), proj.starter.h, h.goalie)
+    
+    a.goalie <- ifelse(event.team == h.team, event.goalie, NA)%>%
+        na.locf(na.rm = FALSE) %>%
+        na.locf(na.rm = FALSE, fromLast = TRUE)
+    a.goalie <- ifelse(is.na(a.goalie), proj.starter.a, a.goalie)
+    
+    e.times <- data.frame(season = season,
+                          game_id = game.id,
+                          home.team = h.team,
+                          away.team = a.team,
+                          home.goalie = h.goalie,
+                          away.goalie = a.goalie,
+                          g.H1 = as.character(act.goalies[["goalie"]][1]),
+                          g.H2 = as.character(act.goalies[["goalie"]][2]),
+                          g.A1 = as.character(act.goalies[["goalie"]][3]),
+                          g.A2 = as.character(act.goalies[["goalie"]][4]),
+                          team = event.team,
+                          goalie = event.goalie,
+                          event = g.json[["liveData"]][["plays"]][["allPlays"]][["result"]][["event"]],
+                          goals = g.json[["liveData"]][["plays"]][["allPlays"]][["about"]][["goals"]],
+                          period = g.json[["liveData"]][["plays"]][["allPlays"]][["about"]][["period"]],
+                          time = g.json[["liveData"]][["plays"]][["allPlays"]][["about"]][["periodTimeRemaining"]])
+    
+    eval.times <- e.times %>%
+        filter(event %in% c("Goal", "Shot", "Game Scheduled", "Period End")) %>%
+        filter(period <= 3) %>%
+        mutate(goalie = ifelse(is.na(goalie),
+                               ifelse(as.character(team) == as.character(home.team),
+                                      as.character(away.goalie),
+                                      as.character(home.goalie)),
+                               as.character(goalie)),
+               home.shot = as.numeric(event != "Game Scheduled" &
+                                          event != "Period End" &
+                                          as.character(team) == as.character(home.team)),
+               away.shot = as.numeric(event != "Game Scheduled" &
+                                          event != "Period End" &
+                                          as.character(team) == as.character(away.team)),
+               H1.shot = as.numeric(away.shot &
+                                        as.character(goalie) == as.character(g.H1)),
+               H2.shot = as.numeric(away.shot &
+                                        as.character(goalie) == as.character(g.H2)),
+               A1.shot = as.numeric(home.shot &
+                                        as.character(goalie) == as.character(g.A1)),
+               A2.shot = as.numeric(home.shot &
+                                        as.character(goalie) == as.character(g.A2)),
+               H1.goal = as.numeric(H1.shot & event == "Goal"),
+               H2.goal = as.numeric(H2.shot & event == "Goal"),
+               A1.goal = as.numeric(A1.shot & event == "Goal"),
+               A2.goal = as.numeric(A2.shot & event == "Goal"),
+               time = (60 * 20 * period) - as.numeric(seconds(ms(time)))) %>%
+        group_by(season, game_id, home.team, away.team) %>%
+        summarise(home.goalie = home.goalie,
+                  away.goalie = away.goalie,
+                  g.H1 = g.H1,
+                  g.H2 = g.H2,
+                  g.A1 = g.A1,
+                  g.A2 = g.A2,
+                  time = time,
+                  event = event,
+                  home.goals = goals.home,
+                  away.goals = goals.away,
+                  home.shots = cumsum(home.shot),
+                  away.shots = cumsum(away.shot),
+                  H1.shots = cumsum(H1.shot),
+                  H2.shots = cumsum(H2.shot),
+                  A1.shots = cumsum(A1.shot),
+                  A2.shots = cumsum(A2.shot),
+                  H1.goals = cumsum(H1.goal),
+                  H2.goals = cumsum(H2.goal),
+                  A1.goals = cumsum(A1.goal),
+                  A2.goals = cumsum(A2.goal),
+                  .groups = "drop") %>%
+        filter(event != "Shot") %>%
+        select(-event) %>%
+        mutate(d.score = home.goals - away.goals,
+               home.team = team.replace(as.character(home.team)),
+               away.team = team.replace(as.character(away.team)),
+               home.goalie = as.character(home.goalie),
+               away.goalie = as.character(away.goalie),
+               g.H1 = as.character(g.H1),
+               g.H2 = as.character(g.H2),
+               g.A1 = as.character(g.A1),
+               g.A2 = as.character(g.A2))
+    
+    return(eval.times)
+}
+
+get.win.probs <- function(eval.times, nb.fit, prior.shots) {
+    # eval.times = data frame of goalie evaluation times for a single game
+    # nb.fit = negative binomial fit on today's prior shots
+    # prior.shots = data frame of prior games to use
+    # return updated data frame for game with win probabilities
+    h.team <- unique(eval.times["home.team"])
+    a.team <- unique(eval.times["away.team"])
+    g.H1 <- unique(eval.times["g.H1"])
+    g.H2 <- unique(eval.times["g.H2"])
+    g.A1 <- unique(eval.times["g.A1"])
+    g.A2 <- unique(eval.times["g.A2"])
+    home <- c("Home", "Away")
+    team <- unname(unlist(c(h.team, a.team)))
+    
+    r <- nb.fit$theta
+    p <- predict(nb.fit, data.frame(team = team, home = home), type = "response")
+    
+    p <- r / (r + p)
+    r <- r/60
+    
+    H1.prior <- get.goalie.prior(as.character(g.H1), as.character(h.team), prior.shots)
+    H2.prior <- get.goalie.prior(as.character(g.H2), as.character(h.team), prior.shots)
+    A1.prior <- get.goalie.prior(as.character(g.A1), as.character(a.team), prior.shots)
+    A2.prior <- get.goalie.prior(as.character(g.A2), as.character(a.team), prior.shots)
+    
+    H1.A1 <- apply(eval.times, MARGIN = 1,
+                   function(x) s.win.prob.t(H1.prior[1], H1.prior[2], p[1], as.numeric(x[20]),
+                                            as.numeric(x[16]) - as.numeric(x[20]),
+                                            A1.prior[1], A1.prior[2], p[2], as.numeric(x[22]),
+                                            as.numeric(x[18]) - as.numeric(x[22]),
+                                            (3600 - as.numeric(x[11]))/60,
+                                            r, as.numeric(x[24])))
+    
+    H1.A2 <- apply(eval.times, MARGIN = 1,
+                   function(x) s.win.prob.t(H1.prior[1], H1.prior[2], p[1], as.numeric(x[20]),
+                                            as.numeric(x[16]) - as.numeric(x[20]),
+                                            A2.prior[1], A2.prior[2], p[2], as.numeric(x[23]),
+                                            as.numeric(x[19]) - as.numeric(x[23]),
+                                            (3600 - as.numeric(x[11]))/60,
+                                            r, as.numeric(x[24])))
+    
+    H2.A1 <- apply(eval.times, MARGIN = 1,
+                   function(x) s.win.prob.t(H2.prior[1], H2.prior[2], p[1], as.numeric(x[21]),
+                                            as.numeric(x[17]) - as.numeric(x[21]),
+                                            A1.prior[1], A1.prior[2], p[2], as.numeric(x[22]),
+                                            as.numeric(x[18]) - as.numeric(x[22]),
+                                            (3600 - as.numeric(x[11]))/60,
+                                            r, as.numeric(x[24])))
+    
+    H2.A2 <- apply(eval.times, MARGIN = 1,
+                   function(x) s.win.prob.t(H2.prior[1], H2.prior[2], p[1], as.numeric(x[21]),
+                                            as.numeric(x[17]) - as.numeric(x[21]),
+                                            A2.prior[1], A2.prior[2], p[2], as.numeric(x[23]),
+                                            as.numeric(x[19]) - as.numeric(x[23]),
+                                            (3600 - as.numeric(x[11]))/60,
+                                            r, as.numeric(x[24])))
+    
+    wp.recs <- tibble(eval.times,
+                      H1.A1 = H1.A1,
+                      H1.A2 = H1.A2,
+                      H2.A1 = H2.A1,
+                      H2.A2 = H2.A2) %>%
+        mutate(current.home.wp = ((home.goalie == g.H1 & away.goalie == g.A1) * H1.A1) +
+                   ((home.goalie == g.H1 & away.goalie == g.A2) * H1.A2) +
+                   ((home.goalie == g.H2 & away.goalie == g.A1) * H2.A1) +
+                   ((home.goalie == g.H2 & away.goalie == g.A2) * H2.A2),
+               current.away.wp = 1 - current.home.wp,
+               d.wp.home = ((home.goalie == g.H1 & away.goalie == g.A1) * (H2.A1 - H1.A1)) +
+                   ((home.goalie == g.H1 & away.goalie == g.A2) * (H2.A2 - H1.A2)) +
+                   ((home.goalie == g.H2 & away.goalie == g.A1) * (H1.A1 - H2.A1)) +
+                   ((home.goalie == g.H2 & away.goalie == g.A2) * (H1.A2 - H2.A2)),
+               d.wp.away = ((home.goalie == g.H1 & away.goalie == g.A1) * ((1 - H1.A2) - (1 - H1.A1))) +
+                   ((home.goalie == g.H1 & away.goalie == g.A2) * ((1 - H1.A1) - (1 - H1.A2))) +
+                   ((home.goalie == g.H2 & away.goalie == g.A1) * ((1 - H2.A2) - (1 - H2.A1))) +
+                   ((home.goalie == g.H2 & away.goalie == g.A2) * ((1 - H2.A1) - (1 - H2.A2))),
+               home.rec = ifelse(d.wp.home > 0,
+                                 ifelse(home.goalie == g.H1, g.H2, g.H1),
+                                 ifelse(home.goalie == g.H1, g.H1, g.H2)),
+               away.rec = ifelse(d.wp.away > 0,
+                                 ifelse(away.goalie == g.A1, g.A2, g.A1),
+                                 ifelse(away.goalie == g.A1, g.A1, g.A2))) %>%
+        filter(time > 0 & time < 3600)
+    
+    return(wp.recs)
+}
+
+rec.output <- function(wp.recs) {
+    # wp.recs = full data frame of recommendation information
+    # return smaller data frame that outputs necessary information
+    return(select(wp.recs,
+                  home.team, away.team, time, home.goals, away.goals,
+                  current.home.wp, current.away.wp,
+                  d.wp.home, d.wp.away, home.rec, away.rec))
+}
+```
+
+As I mentioned above, I posted some example decisions on Twitter during the 2022 Playoffs. I limited my posts to decisions that I found interesting, which to me was any decision where the estimated win probability gain from switching goalies was large enough to at least make me think about switching goalies. Many of them may only be interesting to *me*, and in many cases I wouldn't end up choosing to switch goalies, but the playoffs provide a good setting for testing the decision machine. We have a full regular season of relevant data from which to compute priors, and every coach should be making decisions that maximize their team's win probability, as wins are the only thing that matters in the playoffs, unlike in the regular season where points earned are more important than wins. That said, a coach who manages his goalies like a bullpen in baseball and loses will take a significant amount of heat, so there is still an incentive to not make overly-risky decisions.
+
+A few of the games in the 2022 playoffs were particularly exciting, and they included a good amount of decisions that were particularly interesting. I'll provide the output from the decision machine for those games below, along with some discussion about the boldest decisions in my opinion.
+
+However, before getting into some example playoff games, there are a few notes I want to make about the output below. The model I'm using for the decisions below is slightly different from the one I used in the graphs above, as the new model features goalie-specific priors (I'll write a brief post evaluating the new model in the near future). Additionally, while a coach should be thinking about which goalie to have in net at all times during the game, I'm only going to analyze decisions using this model at the end of a period or whenever a goal is scored by either team (I'll explain some of the reasoning behind this later on).
+
+### Florida Panthers vs. Washington Capitals, Game 5
+
+```{r FLA-WSH, echo = FALSE}
+season <- 2021
+game.id <- 30115
+id.str <- paste(0, game.id, sep = "")
+game.link <- paste("https://statsapi.web.nhl.com/api/v1/game/",
+                       season, id.str,
+                       "/feed/live?site=en_nhl", sep = "")
+fla.wsh.5 <- fromJSON(game.link)
+
+# prior data
+act.goalies <- data.frame(team = c("FLA", "FLA", "WSH", "WSH"),
+                          goalie = c("Sergei Bobrovsky", "Spencer Knight",
+                                     "Ilya Samsonov", "Vitek Vanecek"),
+                          g.label = c("H1", "H2", "A1", "A2"))
+prior.shots <- filter(shot.data, season == 2021)
+
+nb.fit <- glm.nb(shots ~ team + home, data = prior.shots)
+
+# goalie evaluation
+eval.times <- get.eval.times(fla.wsh.5, act.goalies, prior.shots)
+
+wp.recs <- get.win.probs(eval.times, nb.fit, prior.shots)
+```
+
+With the series tied at 2 games apiece, this was a crucial game for both teams. However, for the beginning of the game, the Panthers didn't seem to realize this, as they conceded a 3-0 lead to the Capitals less than 4 minutes into the second period, before eventually mounting a comeback and winning 5-3 to take a 3-2 series lead. While a 5-3 score may seem fairly standard, this game provides a good example of a rare occurrence where going against traditional thinking may be best when making goalie-pull decisions. The model output for this game is shown below. Note that win probabilities are expressed as probabilities between 0 and 1, so to get the associated percentage values simply multiply them by 100. Following the conventions from my first post, in the columns representing estimated win probability changes, a positive value (highlighted in yellow) means the team would be better off switching goalies, and a negative value (highlighted in purple) means the team would be better off sticking with their current goalie. Gray rows represent evaluations performed during intermissions.
+
+```{r FLA-WSH Output, echo = FALSE}
+wp.recs %>%
+    rec.output() %>%
+    mutate(current.home.wp = sprintf("%.3f", current.home.wp),
+           current.away.wp = sprintf("%.3f", current.away.wp),
+           d.wp.home = sprintf("%.3f", d.wp.home),
+           d.wp.away = sprintf("%.3f", d.wp.away),
+           home.rec = unlist(lapply(str_split(home.rec, " "),
+                                    function(x) x[2])),
+           away.rec = unlist(lapply(str_split(away.rec, " "),
+                                    function(x) x[2]))) %>%
+    rename("Home" = home.team,
+           "Away" = away.team,
+           "Time" = time,
+           "Home Score" = home.goals,
+           "Away Score" = away.goals,
+           "Home Win Probability" = current.home.wp,
+           "Away Win Probability" = current.away.wp,
+           "Estimated Home WP Change" = d.wp.home,
+           "Estimated Away WP Change" = d.wp.away,
+           "Recommended Home Goalie" = home.rec,
+           "Recommended Away Goalie" = away.rec) %>%
+    kable(align = rep('c', 11)) %>%
+    kable_styling() %>%
+    row_spec(which(!(wp.recs[["time"]] %% 1200)),
+             bold = TRUE,
+             background = "lightgray") %>%
+    column_spec(8,
+                bold = TRUE,
+                color = ifelse(wp.recs[["d.wp.home"]] <= 0, "white", "black"),
+                background = ifelse(wp.recs[["d.wp.home"]] <= 0, "#440154", "#FDE725")) %>%
+    column_spec(9,
+                bold = TRUE,
+                color = ifelse(wp.recs[["d.wp.away"]] <= 0, "white", "black"),
+                background = ifelse(wp.recs[["d.wp.away"]] <= 0, "#440154", "#FDE725"))
+```
+
+When the Capitals scored to make it 3-0, the decision machine recommended that the Panthers switch to Spencer Knight in net, with an estimated win probability gain of `r 100 * round(select(filter(wp.recs, home.goals == 0 & away.goals == 3 & time %% 1200), d.wp.home), 3)`% associated with the switch. However, the Panthers didn't switch to Knight, and instead began their comeback, which actually resulted in an *increase* in the estimated win probability gain from switching to Knight. This may not be intuitive, but think of it this way -- when down 3-0, Knight was the better choice (according to this model), but the estimated win probability gain was so minimal because even with a better goalie, the Panthers are still down by 3 goals. As they begin to close the gap on the scoreboard, however, Knight is still the better choice, and the fact that the game is now tighter means that Knight provides a bigger boost to the Panthers' win probability. In a way, the Panthers have more to lose by sticking with Bobrovsky during this comeback. Nevertheless, the Panthers never switched to Knight in this game, and they did eventually complete the comeback. However, this is a great example of a game where I believe a coach should be thinking about a goalie change after their team scores a goal. In reality, no coach would ever consider pulling a goalie under these circumstances (they would typically only do so after a goal against or after an intermission), but the output above should ideally get coaches to think differently about when to judge their goalies.
+
+Note also that the decision machine recommends Vanecek over Samsonov at the time of the Capitals' first goal, despite the fact that Samsonov had not allowed any goals to that point -- this is because the priors on the four goalies' save probabilities are estimated using their regular-season starts, and Vanecek's regular-season numbers were much better than Samsonov's numbers. This serves as another reminder that these numbers without the proper context are not particularly useful, and ideally a coach would weigh the output of this model along with their subjective opinion about how their team's two goalies have performed in the current game and in previous games.
+
+### Calgary Flames vs. Edmonton Oilers, Game 1
+
+```{r CGY-EDM, echo = FALSE}
+season <- 2021
+game.id <- 30241
+id.str <- paste(0, game.id, sep = "")
+game.link <- paste("https://statsapi.web.nhl.com/api/v1/game/",
+                       season, id.str,
+                       "/feed/live?site=en_nhl", sep = "")
+cgy.edm.1 <- fromJSON(game.link)
+
+# prior data
+act.goalies <- data.frame(team = c("CGY", "CGY", "EDM", "EDM"),
+                          goalie = c("Jacob Markstrom", "Dan Vladar",
+                                     "Mike Smith", "Mikko Koskinen"),
+                          g.label = c("H1", "H2", "A1", "A2"))
+prior.shots <- filter(shot.data, season == 2021)
+
+nb.fit <- glm.nb(shots ~ team + home, data = prior.shots)
+
+# goalie evaluation
+eval.times <- get.eval.times(cgy.edm.1, act.goalies, prior.shots)
+
+wp.recs <- get.win.probs(eval.times, nb.fit, prior.shots)
+```
+
+The "Battle of Alberta" got off to a great start, with the Flames taking Game 1 9-6 over the Oilers. With that many goals, it shouldn't come as a surprise that the game featured some bad goaltending and some interesting decisions by both coaches. The model output for this game is shown below.
+
+```{r CGY-EDM Output, echo = FALSE}
+wp.recs %>%
+    rec.output() %>%
+    mutate(current.home.wp = sprintf("%.3f", current.home.wp),
+           current.away.wp = sprintf("%.3f", current.away.wp),
+           d.wp.home = sprintf("%.3f", d.wp.home),
+           d.wp.away = sprintf("%.3f", d.wp.away),
+           home.rec = unlist(lapply(str_split(home.rec, " "),
+                                    function(x) x[2])),
+           away.rec = unlist(lapply(str_split(away.rec, " "),
+                                    function(x) x[2]))) %>%
+    rename("Home" = home.team,
+           "Away" = away.team,
+           "Time" = time,
+           "Home Score" = home.goals,
+           "Away Score" = away.goals,
+           "Home Win Probability" = current.home.wp,
+           "Away Win Probability" = current.away.wp,
+           "Estimated Home WP Change" = d.wp.home,
+           "Estimated Away WP Change" = d.wp.away,
+           "Recommended Home Goalie" = home.rec,
+           "Recommended Away Goalie" = away.rec) %>%
+    kable(align = rep('c', 11)) %>%
+    kable_styling() %>%
+    row_spec(which(!(wp.recs[["time"]] %% 1200)),
+             bold = TRUE,
+             background = "lightgray") %>%
+    column_spec(8,
+                bold = TRUE,
+                color = ifelse(wp.recs[["d.wp.home"]] <= 0, "white", "black"),
+                background = ifelse(wp.recs[["d.wp.home"]] <= 0, "#440154", "#FDE725")) %>%
+    column_spec(9,
+                bold = TRUE,
+                color = ifelse(wp.recs[["d.wp.away"]] <= 0, "white", "black"),
+                background = ifelse(wp.recs[["d.wp.away"]] <= 0, "#440154", "#FDE725"))
+```
+
+One of the first things to note about this game is that Mike Smith was pulled *extremely* early. Calgary was up 2-0 by the end of the first *minute* of the game, with Smith giving up a goal on his first shot faced and 2 goals on his first 3 shots faced. While he managed to keep the puck out of the net for a few more minutes, he gave up his third goal on his tenth shot faced only 6 minutes into the game, prompting Jay Woodcroft to pull him for Mikko Koskinen. As shown in the table above, Edmonton could have gained `r 100 * round(select(filter(wp.recs, home.goals == 1 & away.goals == 0 & time %% 1200), d.wp.away), 3)`% by pulling Smith after Calgary's first goal or `r 100 * round(select(filter(wp.recs, home.goals == 2 & away.goals == 0 & time %% 1200), d.wp.away), 3)`% by pulling Smith after Calgary's second goal, but instead chose to leave Smith in the game. While Smith is notorious for being an extremely high-variance goalie, it's hard to fault Woodcroft for not pulling Smith after only one or two goals, even with the large estimated win probability gains from this model. Nevertheless, Edmonton did eventually gain `r 100 * round(select(filter(wp.recs, home.goals == 3 & away.goals == 0 & time %% 1200), d.wp.away), 3)`% in win probability by pulling Smith for Koskinen, so Woodcroft deserves some credit for making a change so early in the game. Also of interest regarding Edmonton's goalies is that despite Koskinen giving up 5 goals by the end of the game (the ninth Calgary goal was an empty-net goal), at no point would Edmonton have been better off by going back to Smith. Despite Koskinen also having a relatively poor performance, he was still a better option than Smith. All things considered, I think Woodcroft made some smart decisions about his goalies in a game where his team lost 9-6.
+
+On the other hand, Darryl Sutter may have come away from this game with a win, but his process was not very sound according to this model. Despite the model suggesting that Jacob Markstrom should have been pulled after allowing 1 goal on 5 shots and after allowing 2 goals on 9 shots, Calgary was up 3-1 and 5-2 at both of those times, so again it's hard to fault Sutter for sticking it out with Markstrom. However, when Edmonton began their comeback at the end of the second period, with Markstrom allowing his third, fourth, and fifth goals on only his 12th, 14th, and 17th shots faced, respectively, Sutter may have wanted to consider pulling Markstrom after any of those goals. In my subjective opinion, this is one of the best instances in which this model is particularly useful -- your goalie is having a terrible game, and yet not only are you still in the game, but you have the lead! Sure, it's the playoffs and Markstrom is the guy who got you to this point, but he is clearly not having a good game by his standards. At the very least, Sutter probably should have been strongly considering going to Vladar to start the third period (which would have provided an estimated win probability gain of `r 100 * round(select(filter(wp.recs, home.goals == 6 & away.goals == 5 & !(time %% 1200)), d.wp.home), 3)`%). However, Markstrom came out to start the third period, and less than two minutes into the period, Markstrom allowed his sixth goal of the night on his 20th shot faced, and just like that Calgary's four-goal lead had been erased. The estimated win probability gain from going to Dan Vladar was up to `r 100 * round(select(filter(wp.recs, home.goals == 6 & away.goals == 6 & time %% 1200), d.wp.home), 3)`%, which would have bumped Calgary's then-current win probability of `r 100 * round(select(filter(wp.recs, home.goals == 6 & away.goals == 6 & time %% 1200), current.home.wp), 3)`% over 50%. Yet somehow, Calgary and Markstrom managed to stop the Edmonton surge, breaking the tie shortly after and going on to win the game. To me, this feels like bad process leading to good results for Sutter and the Flames, but part of what makes the NHL playoffs so exciting is that only the end result matters. That said, Calgary did go on to lose the next four games, with Markstrom playing poorly in most of those games and Sutter never giving Vladar the net in relief. It's unfair for me to suggest that Sutter's refusal to pull Markstrom in Game 1 foretold bad things for Calgary (since one of the critical assumptions underlying this model is that all games are independent), but it seems as though Sutter's conservative decision-making in Game 1 was a recurring habit through the remainder of the series that inevitably contributed to Calgary's early elimination.
+
+### Colorado Avalanche vs. Edmonton Oilers, Game 1
+
+```{r COL-EDM, echo = FALSE}
+season <- 2021
+game.id <- 30321
+id.str <- paste(0, game.id, sep = "")
+game.link <- paste("https://statsapi.web.nhl.com/api/v1/game/",
+                       season, id.str,
+                       "/feed/live?site=en_nhl", sep = "")
+col.edm.1 <- fromJSON(game.link)
+
+# prior data
+act.goalies <- data.frame(team = c("COL", "COL", "EDM", "EDM"),
+                          goalie = c("Darcy Kuemper", "Pavel Francouz",
+                                     "Mike Smith", "Mikko Koskinen"),
+                          g.label = c("H1", "H2", "A1", "A2"))
+prior.shots <- filter(shot.data, season == 2021)
+
+nb.fit <- glm.nb(shots ~ team + home, data = prior.shots)
+
+# goalie evaluation
+eval.times <- get.eval.times(col.edm.1, act.goalies, prior.shots)
+
+wp.recs <- get.win.probs(eval.times, nb.fit, prior.shots)
+```
+
+In the first game of their next series, Edmonton again found themselves in a shootout that was somehow only the 2nd-highest scoring game of the 2022 playoffs to that point (with their previous Game 1 having one more goal), eventually losing to Colorado by a score of 8-6.
+
+```{r COL-EDM Output, echo = FALSE}
+wp.recs %>%
+    rec.output() %>%
+    mutate(current.home.wp = sprintf("%.3f", current.home.wp),
+           current.away.wp = sprintf("%.3f", current.away.wp),
+           d.wp.home = sprintf("%.3f", d.wp.home),
+           d.wp.away = sprintf("%.3f", d.wp.away),
+           home.rec = unlist(lapply(str_split(home.rec, " "),
+                                    function(x) x[2])),
+           away.rec = unlist(lapply(str_split(away.rec, " "),
+                                    function(x) x[2]))) %>%
+    rename("Home" = home.team,
+           "Away" = away.team,
+           "Time" = time,
+           "Home Score" = home.goals,
+           "Away Score" = away.goals,
+           "Home Win Probability" = current.home.wp,
+           "Away Win Probability" = current.away.wp,
+           "Estimated Home WP Change" = d.wp.home,
+           "Estimated Away WP Change" = d.wp.away,
+           "Recommended Home Goalie" = home.rec,
+           "Recommended Away Goalie" = away.rec) %>%
+    kable(align = rep('c', 11)) %>%
+    kable_styling() %>%
+    row_spec(which(!(wp.recs[["time"]] %% 1200)),
+             bold = TRUE,
+             background = "lightgray") %>%
+    column_spec(8,
+                bold = TRUE,
+                color = ifelse(wp.recs[["d.wp.home"]] <= 0, "white", "black"),
+                background = ifelse(wp.recs[["d.wp.home"]] <= 0, "#440154", "#FDE725")) %>%
+    column_spec(9,
+                bold = TRUE,
+                color = ifelse(wp.recs[["d.wp.away"]] <= 0, "white", "black"),
+                background = ifelse(wp.recs[["d.wp.away"]] <= 0, "#440154", "#FDE725"))
+```
+
+Much like Game 1 of the Battle of Alberta, both teams faced some interesting decisions in this game. Edmonton opened the scoring early, scoring on only their second shot against Darcy Kuemper. However, Colorado answered back shortly after, on only their second shot against Mike Smith. After this point, both teams would have been better off switching goalies *at every evaluation point* until after Colorado's sixth goal, when Edmonton finally pulled the trigger and pulled Smith in favor of Koskinen, and Pavel Francouz was forced into action because of an injury to Kuemper. While Smith allowing 6 goals before the end of the second period certainly looks bad, the Oilers were getting *heavily* outplayed by Colorado, so I don't fault Jay Woodcroft too much for not pulling Smith early in the game. That said, even when you don't think your goalie is to blame for most of the goals he's allowed, it's hard not to pull him when you've given up 5 goals on 22 shots in Game 1 of the Conference Finals. All things considered, I think this is a situation where the decision machine output doesn't line up very well with a subjective opinion of Smith for the first 3 or 4 goals, but at some point a pull should become the obvious decision, even if it's only to try and reverse the momentum of the game.
+
+On the other hand, Jared Bednar can also be forgiven for not pulling Darcy Kuemper, even though he certainly didn't play well before his injury forced him out of the game. Kuemper allowed 1 goal on 2 shots, 2 goals on 8 shots, and 3 goals on 13 shots before eventually being removed from the game because of injury. In the majority of hockey games where your goalie performs this poorly, there's no way he should be allowed to continue in the game, but luckily for Bednar and the Avalanche, their offense was firing on all cylinders and Kuemper's poor performance never really put them in jeopardy. Francouz did allow 3 goals in relief of Kuemper, but by that point, the game was nearly over, and even with the decision machine not being aware of Kuemper being unavailable, the Avalanche were better off with Francouz anyway. Not only did Francouz outperform Kuemper in this game, but he also won the next 3 games in a row to sweep Edmonton en route to the Stanley Cup Final while Kuemper was out with injury.
+
+## Conclusion
+
+There are still a few more things to discuss about this project -- such as creation of goalie-specific priors and whether using this model would actually improve a team's record -- and models can always be improved with new information and/or new methods, but this write-up essentially completes the basic framework for how we might be able to compute live goalie-dependent win probabilities and how to use them to improve the decision-making process behind when to pull the starting goalie. Again, I haven't really evaluated the performance of this model all that much, and there's almost certainly a better way to model this decision process, but at the very least this project series should inspire you to put a little bit more thought into an often-overlooked part of hockey.
