@@ -1,0 +1,529 @@
+---
+title: "Goalie-Specific Priors on Save Probability"
+author: "Ian Ferer"
+date: "2022-12-12"
+output:
+    html_document: default
+    pdf_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(RCurl)
+library(xml2)
+library(rvest)
+library(jsonlite)
+library(foreach)
+library(lubridate)
+library(teamcolors)
+library(survival)
+library(survminer)
+library(knitr)
+library(gtsummary)
+library(kableExtra)
+library(MASS)
+library(fitdistrplus)
+library(pscl)
+library(lmtest)
+library(pROC)
+library(MLmetrics)
+library(gganimate)
+library(transformr)
+library(gifski)
+library(ggrepel)
+library(tidyverse)
+```
+
+```{r Evaluation Setup, echo = FALSE}
+# --------------------------------------------
+# Data
+# --------------------------------------------
+
+beta.mom <- function(m, v) {
+    # m = sample mean
+    # v = sample variance
+    # return (a.hat, b.hat), the method-of-moments estimators of the beta distribution
+    a.hat <- m * (((1 - m) / v) - 1)
+    b.hat <- (1 - m) * (((1 - m) / v) - 1)
+    return(c(a.hat, b.hat))
+}
+
+nbinom.mom <- function(m, v) {
+    # m = sample mean
+    # v = sample variance
+    # return (p.hat, r.hat), the method-of-moments estimators of the negative binomial distribution
+    p.hat <- m / v
+    r.hat <- (m^2) /  (v - m)
+    return(c(p.hat, r.hat))
+}
+
+team.replace <- function(team.code) {
+    # team.code = vector of 3-letter team codes
+    # return vector replacing LAK, NJD, SJS, and TBL with L.A, N.J, S.J, and T.B
+    new.code <- ifelse(team.code == "LAK", "L.A",
+                       ifelse(team.code == "NJD", "N.J",
+                              ifelse(team.code == "SJS", "S.J",
+                                     ifelse(team.code == "TBL", "T.B", team.code))))
+    return(new.code)
+}
+
+# read in shot data
+all.shots <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/shots_2007_2020.csv",
+                      stringsAsFactors = FALSE)
+shots.2021 <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/shots_2021.csv",
+                       stringsAsFactors = FALSE)
+shots.2022 <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/shots_2022.csv",
+                       stringsAsFactors = FALSE)
+all.shots <- rbind(all.shots, shots.2021, shots.2022) %>%
+    mutate(homeTeamCode = team.replace(homeTeamCode),
+           awayTeamCode = team.replace(awayTeamCode),
+           teamCode = team.replace(teamCode))
+
+shot.events <- c("SHOT", "GOAL")
+
+# read in game-level data
+games <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/games_2007_2022.csv",
+                  stringsAsFactors = FALSE) %>%
+    mutate(team = team.replace(team),
+           opposingTeam = team.replace(opposingTeam))
+
+# read in team colors
+team.colors <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/team_colors.csv",
+                        stringsAsFactors = FALSE)
+team.colors.2 <- read.csv("C:/Users/fereri/Documents/NHL Timeout Value/Shot CPP/team_colors_2.csv",
+                          stringsAsFactors = FALSE)
+
+t.color <- team.colors$color
+names(t.color) <- team.colors$team
+
+team.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = teamCode,
+           opponent = ifelse(teamCode == homeTeamCode,
+                             awayTeamCode,
+                             homeTeamCode),
+           home = ifelse(teamCode == homeTeamCode,
+                         "Home",
+                         "Away")) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(shots = n(),
+              goals = sum(event == "GOAL"))
+
+goalie.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = ifelse(teamCode == homeTeamCode,
+                         awayTeamCode,
+                         homeTeamCode),
+           opponent = teamCode,
+           home = ifelse(teamCode == homeTeamCode,
+                         "Away",
+                         "Home"),
+           shot.goalie = goalieNameForShot) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(starter = first(shot.goalie[shot.goalie != ""]),
+              st.shots.against = sum(shot.goalie != "" &
+                                         shot.goalie == first(shot.goalie[shot.goalie != ""])),
+              st.goals.against = sum(shot.goalie != "" &
+                                         shot.goalie == first(shot.goalie[shot.goalie != ""]) &
+                                         event == "GOAL")) %>%
+    mutate(st.svp = 1 - (st.goals.against / st.shots.against),
+           st.svp.adj = (st.shots.against - st.goals.against + 1) / (st.shots.against + 2),
+           rbs = as.numeric(st.svp <= 0.85))
+
+game.info <- all.shots %>%
+    filter(season >= 2014) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(team = teamCode,
+           opponent = ifelse(teamCode == homeTeamCode,
+                             awayTeamCode,
+                             homeTeamCode),
+           home = ifelse(teamCode == homeTeamCode,
+                         "Home",
+                         "Away"),
+           win = ifelse(teamCode == homeTeamCode,
+                        homeTeamWon,
+                        1 - homeTeamWon)) %>%
+    group_by(season, game_id) %>%
+    filter(!any(goalieNameForShot == "" & event == "SHOT")) %>%
+    filter(!any(time == 0)) %>%
+    ungroup() %>%
+    group_by(season, game_id, team, opponent, home) %>%
+    summarise(win = mean(win))
+
+game.date <- games %>%
+    filter(season >= 2014) %>%
+    filter(playoffGame == 0) %>%
+    mutate(game_id = gameId %% 1e5,
+           opponent = opposingTeam,
+           home = ifelse(home_or_away == "HOME",
+                         "Home",
+                         "Away"),
+           date = ymd(gameDate)) %>%
+    group_by(season, game_id, team, opponent, home, date) %>%
+    summarise()
+
+shot.data <- game.date %>%
+    inner_join(team.info) %>%
+    inner_join(goalie.info) %>%
+    inner_join(game.info) %>%
+    ungroup() %>%
+    mutate(team = as.factor(team),
+           opponent = as.factor(opponent),
+           home = as.factor(home)) %>%
+    filter(shots >= 10)
+
+# --------------------------------------------
+# Model Evaluation (Setup)
+# --------------------------------------------
+
+set.seed(1)
+
+s.prob.score.k <- function(k, A, B, r, p) {
+    # k = number of goals scored
+    # A, B = save percentage prior encoding
+    # r, p = negative binomial distribution parameters
+    m <- k:100
+    Q <- choose(m, k) * choose(m + r - 1, m) * (1/beta(A, B)) * beta(A + k, B + m - k) * (p^r) * ((1 - p)^m)
+    return(sum(Q))
+}
+
+s.win.prob.k <- function(k1, k2, A1, B1, p1, g1, s1, A2, B2, p2, g2, s2, t, r, d) {
+    # k1 = number of goals by home team
+    # k2 = number of goals by away team
+    # A1, B1 = save percentage prior encoding of home team
+    # p1 = NB prob. parameter of home team
+    # g1 = goals allowed by home team up to time t
+    # s1 = saves made by home team up to time t
+    # A2, B2 = save percentage prior encoding of away team
+    # p2 = NB prob. parameter of away team
+    # g2 = goals allowed by away team up to time t
+    # s2 = saves made by away team up to time t
+    # r = NB shape parameter estimate
+    # t = seconds remaining in regulation
+    # d = current score differential (from perspective of home team)
+    prob.adj <- ifelse(k1 - k2 > -d, 1, 1/2)
+    home.comp <- s.prob.score.k(k1, A2 + g2, B2 + s2, t*r, p1)
+    away.comp <- s.prob.score.k(k2, A1 + g1, B1 + s1, t*r, p2)
+    return(prob.adj * home.comp * away.comp)
+}
+
+s.win.prob.t <- function(A1, B1, p1, g1, s1, A2, B2, p2, g2, s2, t, r, d) {
+    # choose upper bound on K (K.max) by finding minimum n such that P(score at most n) >= 0.99
+    N <- seq(0, 100, by = 1)
+    prob.k1 <- sapply(N, function(x) s.prob.score.k(x, A2 + g2, B2 + s2, t*r, p1))
+    prob.k2 <- sapply(N, function(x) s.prob.score.k(x, A1 + g1, B1 + s1, t*r, p2))
+    c.prob.k1 <- sapply(1:length(prob.k1), function(x) sum(prob.k1[1:x]))
+    c.prob.k2 <- sapply(1:length(prob.k2), function(x) sum(prob.k2[1:x]))
+    K1.max <- N[min(which(c.prob.k1 >= 0.999))]
+    K2.max <- N[min(which(c.prob.k2 >= 0.999))]
+    K1 <- rep(seq(0, K1.max, by = 1), rep(K2.max + 1, K1.max + 1))
+    K2 <- rep(seq(0, K2.max, by = 1), K1.max + 1)
+    K <- cbind(K1, K2) %>% as.data.frame() %>% filter(K1 - K2 >= -d)
+    W <- apply(K, MARGIN = 1, function(x) s.win.prob.k(x[1], x[2], A1, B1, p1, g1, s1, A2, B2, p2, g2, s2, t, r, d))
+    return(sum(W))
+}
+
+# randomly sample 5 times from each period of each game in the 2018 season
+game.all.times <- all.shots %>%
+    filter(season == 2018) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(home.team = homeTeamCode,
+           away.team = awayTeamCode) %>%
+    group_by(season, game_id, home.team, away.team) %>%
+    expand(time = 1:3600)
+
+game.goalies <- all.shots %>%
+    filter(season == 2018) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(goalie = goalieNameForShot, home.team = homeTeamCode, away.team = awayTeamCode,
+           goalie.team = ifelse(teamCode == home.team, "A", "H")) %>%
+    group_by(season, game_id, home.team, away.team, goalie.team) %>%
+    summarise(goalie = unique(goalie[goalie != ""])) %>%
+    summarise(goalie = goalie, goalie.num = 1:n(), .groups = "drop") %>%
+    group_by(season, game_id, home.team, away.team) %>%
+    complete(goalie.team, goalie.num) %>%
+    mutate(g.label = paste0("g.", goalie.team, goalie.num)) %>%
+    pivot_wider(names_from = g.label, values_from = goalie) %>%
+    select(g.H1, g.H2, g.A1, g.A2) %>%
+    mutate(g.H1 = sort(g.H1, na.last = TRUE),
+           g.H2 = sort(g.H2, na.last = TRUE),
+           g.A1 = sort(g.A1, na.last = TRUE),
+           g.A2 = sort(g.A2, na.last = TRUE)) %>%
+    slice(1) %>%
+    mutate(g.H1 = replace(g.H1, is.na(g.H1), "N/A"),
+           g.H2 = replace(g.H2, is.na(g.H2), "N/A"),
+           g.A1 = replace(g.A1, is.na(g.A1), "N/A"),
+           g.A2 = replace(g.A2, is.na(g.A2), "N/A"))
+
+game.shot.times <- all.shots %>%
+    filter(season == 2018) %>%
+    filter(isPlayoffGame == 0) %>%
+    filter(event %in% shot.events) %>%
+    filter(period <= 3) %>%
+    mutate(goalie = goalieNameForShot,
+           home.team = homeTeamCode,
+           away.team = awayTeamCode,
+           home.goalie = ifelse(teamCode == away.team, goalie, NA),
+           home.goalie = replace(home.goalie, home.goalie == "", NA),
+           home.goalie = na.locf(home.goalie, na.rm = FALSE, fromLast = TRUE),
+           home.goalie = na.locf(home.goalie, na.rm = FALSE),
+           away.goalie = ifelse(teamCode == home.team, goalie, NA),
+           away.goalie = replace(away.goalie, away.goalie == "", NA),
+           away.goalie = na.locf(away.goalie, na.rm = FALSE, fromLast = TRUE),
+           away.goalie = na.locf(away.goalie, na.rm = FALSE),
+           home.goal = as.numeric(event == "GOAL" & teamCode == home.team),
+           away.goal = as.numeric(event == "GOAL" & teamCode == away.team),
+           home.shot = as.numeric(teamCode == home.team),
+           away.shot = as.numeric(teamCode == away.team)) %>%
+    group_by(season, game_id, home.team, away.team, time) %>%
+    left_join(game.goalies) %>%
+    mutate(H1.shot = as.numeric(away.shot &
+                                    as.character(goalie) == as.character(g.H1)),
+           H2.shot = as.numeric(away.shot &
+                                    as.character(goalie) == as.character(g.H2)),
+           A1.shot = as.numeric(home.shot &
+                                    as.character(goalie) == as.character(g.A1)),
+           A2.shot = as.numeric(home.shot &
+                                    as.character(goalie) == as.character(g.A2)),
+           H1.goal = as.numeric(H1.shot & event == "GOAL"),
+           H2.goal = as.numeric(H2.shot & event == "GOAL"),
+           A1.goal = as.numeric(A1.shot & event == "GOAL"),
+           A2.goal = as.numeric(A2.shot & event == "GOAL")) %>%
+    group_by(season, game_id, home.team, away.team) %>%
+    summarise(home.goalie = home.goalie,
+              away.goalie = away.goalie,
+              g.H1 = g.H1,
+              g.H2 = g.H2,
+              g.A1 = g.A1,
+              g.A2 = g.A2,
+              time = time,
+              event = event,
+              home.goals = cumsum(home.goal),
+              away.goals = cumsum(away.goal),
+              home.shots = cumsum(home.shot),
+              away.shots = cumsum(away.shot),
+              H1.shots = cumsum(H1.shot),
+              H2.shots = cumsum(H2.shot),
+              A1.shots = cumsum(A1.shot),
+              A2.shots = cumsum(A2.shot),
+              H1.goals = cumsum(H1.goal),
+              H2.goals = cumsum(H2.goal),
+              A1.goals = cumsum(A1.goal),
+              A2.goals = cumsum(A2.goal),
+              home.win = homeTeamWon,
+              .groups = "drop") %>%
+    select(-event) %>%
+    mutate(d.score = home.goals - away.goals,
+           home.team = team.replace(as.character(home.team)),
+           away.team = team.replace(as.character(away.team)),
+           home.goalie = as.character(home.goalie),
+           away.goalie = as.character(away.goalie),
+           g.H1 = as.character(g.H1),
+           g.H2 = as.character(g.H2),
+           g.A1 = as.character(g.A1),
+           g.A2 = as.character(g.A2))
+
+game.score <- game.all.times %>%
+    left_join(game.shot.times) %>%
+    mutate(home.goalie = na.locf(home.goalie, na.rm = FALSE, fromLast = TRUE),
+           home.goalie = na.locf(home.goalie),
+           away.goalie = na.locf(away.goalie, na.rm = FALSE, fromLast = TRUE),
+           away.goalie = na.locf(away.goalie),
+           g.H1 = na.locf(g.H1, na.rm = FALSE, fromLast = TRUE),
+           g.H1 = na.locf(g.H1),
+           g.H2 = na.locf(g.H2, na.rm = FALSE, fromLast = TRUE),
+           g.H2 = na.locf(g.H2),
+           g.A1 = na.locf(g.A1, na.rm = FALSE, fromLast = TRUE),
+           g.A1 = na.locf(g.A1),
+           g.A2 = na.locf(g.A2, na.rm = FALSE, fromLast = TRUE),
+           g.A2 = na.locf(g.A2),
+           home.goals = na.locf(home.goals, na.rm = FALSE),
+           away.goals = na.locf(away.goals, na.rm = FALSE),
+           home.shots = na.locf(home.shots, na.rm = FALSE),
+           away.shots = na.locf(away.shots, na.rm = FALSE),
+           home.goals = replace(home.goals, is.na(home.goals), 0),
+           away.goals = replace(away.goals, is.na(away.goals), 0),
+           home.shots = replace(home.shots, is.na(home.shots), 0),
+           away.shots = replace(away.shots, is.na(away.shots), 0),
+           H1.goals = na.locf(H1.goals, na.rm = FALSE),
+           H2.goals = na.locf(H2.goals, na.rm = FALSE),
+           H1.shots = na.locf(H1.shots, na.rm = FALSE),
+           H2.shots = na.locf(H2.shots, na.rm = FALSE),
+           H1.goals = replace(H1.goals, is.na(H1.goals), 0),
+           H2.goals = replace(H2.goals, is.na(H2.goals), 0),
+           H1.shots = replace(H1.shots, is.na(H1.shots), 0),
+           H2.shots = replace(H2.shots, is.na(H2.shots), 0),
+           A1.goals = na.locf(A1.goals, na.rm = FALSE),
+           A2.goals = na.locf(A2.goals, na.rm = FALSE),
+           A1.shots = na.locf(A1.shots, na.rm = FALSE),
+           A2.shots = na.locf(A2.shots, na.rm = FALSE),
+           A1.goals = replace(A1.goals, is.na(A1.goals), 0),
+           A2.goals = replace(A2.goals, is.na(A2.goals), 0),
+           A1.shots = replace(A1.shots, is.na(A1.shots), 0),
+           A2.shots = replace(A2.shots, is.na(A2.shots), 0),
+           home.win = na.locf(na.locf(home.win, na.rm = FALSE), fromLast = TRUE)) %>%
+    mutate(period = ifelse(time <= 1200, 1, ifelse(time <= 2400, 2, 3))) %>%
+    relocate(period, .before = time) %>%
+    ungroup() %>%
+    group_by(season, game_id, home.team, away.team, period) %>%
+    slice_sample(n = 5) %>% arrange(season, game_id, period, time) %>%
+    mutate(d.score = home.goals - away.goals) %>%
+    ungroup() %>%
+    group_by(season, game_id) %>%
+    left_join(game.date %>%
+                  ungroup() %>%
+                  group_by(season, game_id) %>%
+                  summarise(game.date = first(date))) %>%
+    relocate(game.date, .after = game_id) %>%
+    relocate(home.win, .after = away.team) %>%
+    mutate(period = as.factor(paste("Period", period))) %>%
+    group_by(season, game_id, game.date, period, time)
+```
+
+In a previous post, I [motivated and created a theoretical win probability model](<https://www.ianferer.com/post/a-theoretical-win-probability-model-for-goalie-evaluation/>). I explored a few different ways to choose parameters that the model depends on, but one way that I haven't written about (but have started using) is using goalie-specific priors. In all of the previous models, I assumed the same prior on all goalies for ease of computation. In practice, however, we know that some goalies are better than others (Connor Hellebuyck, Igor Shesterkin, and Andrei Vasilevskiy come to mind), while others are much worse. Therefore, it may improve the prediction accuracy of the model if we estimate priors specifically for each goalie using exclusively *their* starts, and at the very least, it should result in win probability estimates and goalie recommendations that make more intuitive sense.
+
+To choose the parameters for a specific game, I'm going to consider all regular-season games within the past calendar year as the prior data. This should give us a large enough sample to obtain appropriate estimates, while also ensuring that we're not using irrelevant data. For the distributions on shots on goal per game, I'm again going to train a negative binomial distribution on this prior data set, using the team and a binary home/away variable to get parameter estimates. For the priors on save probability, there are two potential options. If the goalie has played at least 10 games in the past calendar year, I'll simply use all of that goalie's starts and use maximum-likelihood estimations to obtain the best estimates for $\alpha$ and $\beta$ for that particular goalie's Beta distribution on save probability. If the goalie has played fewer than 10 games in the past calendar year, I'll use all starting performances from that goalie's team to get a prior. This isn't perfect -- ideally I'd like to use a "replacement-level prior" for goalies with insufficient starts, but that's not the easiest thing to compute, so the next-best thing is to just assume that a goalie with insufficient information will simply be a plug-in goalie for whichever team he's playing for.
+
+To control the evaluation as best as possible, I'm going to use the same methodology as in the original post and the same list of sampled evaluation points. For this updated model, the binned vs. observed win probability graphs are shown below:
+
+```{r Evaluation, echo = FALSE}
+# --------------------------------------------
+# Model Evaluation
+# --------------------------------------------
+
+get.goalie.prior <- function(g.name, t.name, prior.shots) {
+    # g.name = goalie name
+    # prior.shots = data frame of games used for prior
+    goalie.starts <- prior.shots %>% filter(starter == g.name)
+    if (nrow(goalie.starts) <= 10) {
+        goalie.starts <- prior.shots %>% filter(team == t.name)
+    }
+    
+    svp <- goalie.starts$st.svp.adj
+    beta.params <- beta.mom(mean(svp), var(svp))
+    beta.mle <- fitdistr(svp, "beta", start = list(shape1 = beta.params[1], shape2 = beta.params[2]),
+                         lower = c(0, 0))
+    svp.A <- beta.mle$estimate[2]
+    svp.B <- beta.mle$estimate[1]
+    
+    return(unname(c(svp.A, svp.B)))
+}
+
+prior.shots <- filter(shot.data, season == 2017)
+nb.fit <- glm.nb(shots ~ team + home, data = prior.shots)
+
+# for each row, get appropriate goalie prior 
+s.win.prob <- rep(0, nrow(game.score))
+
+for (i in 1:nrow(game.score)) {
+    
+    home <- as.factor(c("Home", "Away"))
+    teams <- factor(c(game.score$home.team[i], game.score$away.team[i]),
+                    levels = levels(prior.shots$team))
+    
+    r <- nb.fit$theta
+    p <- predict(nb.fit, data.frame(team = teams, home = home), type = "response")
+    
+    p <- r / (r + p)
+    r <- r / 60
+    
+    h.prior <- get.goalie.prior(game.score$home.goalie[i],
+                                game.score$home.team[i],
+                                prior.shots)
+    a.prior <- get.goalie.prior(game.score$away.goalie[i],
+                                game.score$away.team[i],
+                                prior.shots)
+    a.goals <- ((game.score$home.goalie[i] == game.score$g.H1[i]) * game.score$H1.goals[i]) +
+        ((game.score$home.goalie[i] == game.score$g.H2[i]) * game.score$H2.goals[i])
+    a.shots <- ((game.score$home.goalie[i] == game.score$g.H1[i]) * game.score$H1.shots[i]) +
+        ((game.score$home.goalie[i] == game.score$g.H2[i]) * game.score$H2.shots[i])
+    h.goals <- ((game.score$away.goalie[i] == game.score$g.A1[i]) * game.score$A1.goals[i]) +
+        ((game.score$away.goalie[i] == game.score$g.A2[i]) * game.score$H2.goals[i])
+    h.shots <- ((game.score$away.goalie[i] == game.score$g.A1[i]) * game.score$A1.shots[i]) +
+        ((game.score$away.goalie[i] == game.score$g.A2[i]) * game.score$A2.shots[i])
+    
+    s.win.prob[i] <- s.win.prob.t(h.prior[1], h.prior[2], p[1], a.goals, a.shots - a.goals,
+                                  a.prior[1], a.prior[2], p[2], h.goals, h.shots - h.goals,
+                                  (3600 - game.score$time[i])/60, r, game.score$d.score[i])
+    
+}
+
+game.score$shot.wp <- s.win.prob
+
+game.score$wp.bin <- as.factor(round(game.score$shot.wp/0.05)*0.05)
+
+wp.obs <- aggregate(home.win ~ wp.bin + period, data = game.score, FUN = mean)
+bin.count <- apply(wp.obs, MARGIN = 1, function(x) nrow(subset(game.score, wp.bin == x[1] & period == x[2])))
+wp.obs <- cbind(wp.obs, bin.count)
+
+ggplot(wp.obs, aes(x = as.numeric(as.character(wp.bin)), y = home.win, size = bin.count)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1, alpha = 0.5, size = 1.1, lty = 2) +
+    stat_smooth(aes(weight = bin.count), method = "loess", formula = y ~ x, size = 1.1, show.legend = FALSE) +
+    facet_wrap(~period) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = "Predicted Win Probability (Binned)",
+         y = "Observed Win Probability",
+         title = "NHL Win Probability",
+         subtitle = "Home Team WP",
+         size = "Count",
+         caption = "Data via MoneyPuck.com") +
+    xlim(0, 1) +
+    ylim(0, 1)
+```
+
+This model looks good, although it suffers from some of the same drawbacks as the best model from the original post. Nevertheless, the model is definitely not any *worse*, so I'll be using this model going forward, as the numbers we get as output make more intuitive sense to a regular observer. The ROC curves for this model are shown below.
+
+```{r ROC Curves, echo = FALSE}
+s.wp.roc.p1 <- roc(data = filter(game.score, period == "Period 1"), home.win, shot.wp)
+s.wp.roc.p2 <- roc(data = filter(game.score, period == "Period 2"), home.win, shot.wp)
+s.wp.roc.p3 <- roc(data = filter(game.score, period == "Period 3"), home.win, shot.wp)
+
+s.wp.auc <- c(auc(s.wp.roc.p1), auc(s.wp.roc.p2), auc(s.wp.roc.p3))
+s.logloss <- c(LogLoss(filter(game.score, period == "Period 1")$shot.wp,
+                       filter(game.score, period == "Period 1")$home.win),
+               LogLoss(filter(game.score, period == "Period 2")$shot.wp,
+                       filter(game.score, period == "Period 2")$home.win),
+               LogLoss(filter(game.score, period == "Period 3")$shot.wp,
+                       filter(game.score, period == "Period 3")$home.win))
+
+ggroc(list(s.wp.roc.p1, s.wp.roc.p2, s.wp.roc.p3), size = 1.1) +
+    geom_abline(slope = 1, intercept = 1, color = "black", size = 1.1, lty = 2) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16, hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title = element_text(size = 14)) +
+    labs(x = "Specificity",
+         y = "Sensitivity",
+         title = "ROC Curve",
+         subtitle = "Home Team Win Probabilities",
+         color = "Period",
+         caption = "Data via MoneyPuck.com") +
+    scale_color_manual(labels = levels(game.score$period), values = c("#F8766D", "#619CFF", "#00BA38"))
+```
+
+This model gives a log-loss of `r round(s.logloss[1], 3)` for the first period, `r round(s.logloss[2], 3)` for the second period, and `r round(s.logloss[3], 3)` for the third period. The AUC for the three ROC curves are `r round(s.wp.auc[1], 3)` for the first period, `r round(s.wp.auc[2], 3)` for the second period, and `r round(s.wp.auc[3], 3)` for the third period. Comparing these results with those from the original post, we see some marginal improvement by using this model, which further justifies the use of this particular model going forward.
