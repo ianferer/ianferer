@@ -1,0 +1,496 @@
+---
+title: The Case for an Unorthodox Goalie Decision
+author: Ian Ferer
+date: "2023-04-20"
+output:
+    html_document: default
+    pdf_document: default
+---
+
+<script src="{{< blogdown/postref >}}index_files/kePrint/kePrint.js"></script>
+<link href="{{< blogdown/postref >}}index_files/lightable/lightable.css" rel="stylesheet" />
+
+
+<div id="introduction" class="section level2">
+<h2>Introduction</h2>
+<p>Last night, Dean Evason and the Minnesota Wild raised some eyebrows by opting to start Marc-Andre Fleury over Filip Gustavsson, who turned in a 51-save performance en route to a double-overtime win at Dallas in Game 1. However, while this decision may have been confusing and wound up contributing to a 7-3 loss in Game 2, I think it’s still justifiable (even though I and many others may not agree with it). With that in mind, I’d like to make an argument for a seemingly far less defensible decision – <strong>the Wild should have strongly considered pulling Fleury for Gustavsson after Frederick Gaudreau scored for the Wild to cut the lead to 4-3</strong>.</p>
+<p>Before getting into the argument, I’d like to preface this discussion with a few disclaimers. First of all, Marc-Andre Fleury was not the only reason the Wild lost last night. The Stars played a much better overall game and the Wild didn’t give Fleury much help either. That said, Filip Gustavsson has been the far superior goalie this season, saving 24.54 goals above expected in 39 games compared to just 0.86 goals saved above expected by Fleury in 46 games, according to <a href="https://www.evolving-hockey.com/">Evolving-Hockey</a>, so all else held constant, Gustavsson probably would have given Minnesota a better chance to win. Second, the win probability estimates I’m about to quote are just that – estimates. I’ve mentioned the flaws in this win probability model I’m using multiple times already, but I think it’s important to always keep in mind that this model is imperfect and definitely does <em>not</em> capture the full picture of a goaltender’s performance. Finally, I’ll be eliminating the human element of this problem. Marc-Andre Fleury is a well-respected and well-liked NHL player, and I’m sure it would be hard to pull him after only giving up 4 goals, let alone when your team is in the middle of attempting to mount a comeback. However, I’m approaching this as an optimization problem for a playoff team that probably wants to maximize their chances of winning at every conceivable opportunity.</p>
+</div>
+<div id="the-argument" class="section level2">
+<h2>The Argument</h2>
+<p>The win probability graph from last night’s game is shown below. If you’d like to read a bit more on how to read and interpret this graph, you can check out my post <a href="https://www.ianferer.com/post/using-win-probabilities-to-optimize-goalie-switching-decisions/">analyzing decisions from last year’s playoffs</a>, but for this one discussion, the only thing to be aware of is that the black line represents the Stars’ win probability with Fleury in net at each time, and the blue line represents the Stars’ win probability if Gustavsson were to replace Fleury at each time. Because of this, the recommendation from this model would be to pull Fleury if the blue line is lower than the black line.</p>
+<p><img src="{{< blogdown/postref >}}index_files/figure-html/WP%20Graph-1.png" width="672" /></p>
+<p>Clearly, according to this model, the Wild would have been better off with Gustavsson for most (if not all) of this game. After the third Minnesota goal, the gap between Fleury and Gustavsson is particularly wide, so let’s take a closer look at the numbers to get a better idea of just how much Minnesota stood to gain. The table below displays goalie recommendations with estimated changes in win probability for both Minnesota and Dallas if they were to pull their respective starters after each goal and at both intermissions.</p>
+<table class="table" style="margin-left: auto; margin-right: auto;">
+<thead>
+<tr>
+<th style="text-align:center;">
+Home
+</th>
+<th style="text-align:center;">
+Away
+</th>
+<th style="text-align:center;">
+Time
+</th>
+<th style="text-align:center;">
+Home Score
+</th>
+<th style="text-align:center;">
+Away Score
+</th>
+<th style="text-align:center;">
+Home Win Probability
+</th>
+<th style="text-align:center;">
+Away Win Probability
+</th>
+<th style="text-align:center;">
+Estimated Home WP Change
+</th>
+<th style="text-align:center;">
+Estimated Away WP Change
+</th>
+<th style="text-align:center;">
+Recommended Home Goalie
+</th>
+<th style="text-align:center;">
+Recommended Away Goalie
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+254
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+0.770
+</td>
+<td style="text-align:center;">
+0.230
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.005
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.128
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+680
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0
+</td>
+<td style="text-align:center;">
+0.886
+</td>
+<td style="text-align:center;">
+0.114
+</td>
+<td style="text-align:center;font-weight: bold;color: white !important;background-color: #440154 !important;">
+-0.005
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.092
+</td>
+<td style="text-align:center;">
+Oettinger
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+971
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.748
+</td>
+<td style="text-align:center;">
+0.252
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.029
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.116
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+DAL
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+MIN
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+1200
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+2
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+1
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.753
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.247
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.021
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.102
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Wedgewood
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+1447
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.887
+</td>
+<td style="text-align:center;">
+0.113
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.011
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.075
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+1534
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+1
+</td>
+<td style="text-align:center;">
+0.952
+</td>
+<td style="text-align:center;">
+0.048
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.007
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.045
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+1914
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+2
+</td>
+<td style="text-align:center;">
+0.884
+</td>
+<td style="text-align:center;">
+0.116
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.032
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.070
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+1925
+</td>
+<td style="text-align:center;">
+4
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.733
+</td>
+<td style="text-align:center;">
+0.267
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.087
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.129
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+2168
+</td>
+<td style="text-align:center;">
+5
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.880
+</td>
+<td style="text-align:center;">
+0.120
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.049
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.073
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+2216
+</td>
+<td style="text-align:center;">
+6
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.953
+</td>
+<td style="text-align:center;">
+0.047
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.024
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.039
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+DAL
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+MIN
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+2400
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+6
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+3
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.961
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+0.039
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.019
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.026
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Wedgewood
+</td>
+<td style="text-align:center;font-weight: bold;background-color: lightgray !important;">
+Gustavsson
+</td>
+</tr>
+<tr>
+<td style="text-align:center;">
+DAL
+</td>
+<td style="text-align:center;">
+MIN
+</td>
+<td style="text-align:center;">
+3136
+</td>
+<td style="text-align:center;">
+7
+</td>
+<td style="text-align:center;">
+3
+</td>
+<td style="text-align:center;">
+0.998
+</td>
+<td style="text-align:center;">
+0.002
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.000
+</td>
+<td style="text-align:center;font-weight: bold;color: black !important;background-color: #FDE725 !important;">
+0.000
+</td>
+<td style="text-align:center;">
+Wedgewood
+</td>
+<td style="text-align:center;">
+Gustavsson
+</td>
+</tr>
+</tbody>
+</table>
+<p>After cutting the lead to 4-3, Minnesota’s estimated win probability with Fleury was only 26.7%, while their estimated win probability if they switched to Gustavsson would have been 39.5% – a difference of 12.9%. Even if you don’t take that number at face value, it should be clear that even after beginning a comeback, Minnesota still would have been better off with Gustavsson in net than Fleury. However, the Wild stuck with Fleury, and ended up allowing 3 straight goals to Dallas to put the game well out of reach.</p>
+<p>While it may be counterintuitive to pull Fleury <em>during</em> a comeback, let me talk through what <em>my</em> thought process would be if I were the Wild coach during the game:</p>
+<ul>
+<li>Early in the second period, my team goes down 4-1. We’re not playing well, but Fleury doesn’t look particularly great. I might consider pulling him after the fourth goal, but I also need to consider that even if I put in Gustavsson, our chances of winning are still fairly low, since we need at least 3 more goals in regulation. Furthermore, I decided to play Fleury to give Gustavsson some rest after a long game two days ago, so what good would I be doing him if I put him in now? Let’s just ride this one out with Fleury and not give Gustavsson more work when it might not even matter.</li>
+<li>All of a sudden, it’s 4-3. I’m still not confident in Fleury, even though he hasn’t given up any more goals. However, our chances of winning this game now look much better. Why wouldn’t I put in Gustavsson? One reason is that I’d be putting in a cold goalie, although he did just play two days ago and he played very well. Another possible reason is that I played Fleury because I wanted to give Gustavsson some rest after playing into double-overtime last game. However, would I have played Gustavsson tonight if Game 1 ended in regulation? If that’s the case, putting in Gustavsson now (with 7:55 left to play in the second period) would result in him playing only 27:55 if this game ends in regulation. Combining that with the 92:20 ice time he saw in Game 1 gives a total of 120 minutes and 15 seconds, or 15 seconds more than if he had played two full games that ended in regulation. Even though I maybe made a bad call starting Fleury, I have a chance to salvage this game <em>and</em> head home with Gustavsson only having 120 minutes under his belt.</li>
+</ul>
+<p>Admittedly, this is just my thought process, but here’s my big question – why shouldn’t this be Evason’s thought process as well? The justification given for starting Fleury is that Minnesota had been running a goalie rotation all season and it seemed to work well for them, but ostensibly the reason for running a goalie rotation is because you trust both goalies to win when it matters and you don’t want either of them to get overworked. However, based on the game up to this point, does Evason really still trust Fleury to win this game, and would Gustavsson get overworked by playing half of a game after playing one and a half games two nights ago? To me, the answer to both of these questions should be a fairly easy “no,” in which case switching to Gustavsson would be a smart decision to make.</p>
+</div>
+<div id="conclusion" class="section level2">
+<h2>Conclusion</h2>
+<p>I’ve raised this point multiple times before, where I think it may be in a coach’s best interest to pull his goalie during a comeback, even though it goes against everything we’ve seen in the NHL regarding relief goalies. I don’t expect this decision-making process to change anytime soon, but the Fleury situation last night feels like the perfect (albeit rare) situation where coaches should think outside the box a little when it comes to maximizing their team’s chances of winning a single hockey game.</p>
+</div>
