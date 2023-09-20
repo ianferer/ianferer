@@ -1,9 +1,6 @@
 ---
-bio: Statistics Ph.D. Student, UNC Chapel Hill
 education:
   courses:
-  - course: Ph.D. Student, Statistics
-    institution: University of North Carolina at Chapel Hill
   - course: B.S., Mathematics
     institution: Rensselaer Polytechnic Institute
     year: 2019
