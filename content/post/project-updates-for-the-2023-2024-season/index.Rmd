@@ -1,0 +1,20 @@
+---
+title: Project Updates for the 2023-2024 Season
+author: Ian Ferer
+date: '2023-09-21'
+output:
+    html_document: default
+    pdf_document: default
+---
+
+With the Sabres' training camp starting today, I thought it would be a good idea to lay out some updates I hope to make on my live goalie evaluation project during this coming season.
+
+First of all, while I've said multiple times that the model I'm using is far from perfect, I think that the mathematical structures in the model are about as good as I can get them (for the short-term at least). The numbers I'm using as inputs to the model can probably be improved, but the basic structure of Bayesian posterior distributions on save probability and dual compound Poisson processes dependent on those posteriors to estimate goal scoring is mostly complete.
+
+So far, the best model I've found involves using goalie-specific prior distributions on save probability. If a goalie has *started* at least 10 games in the past calendar year, I compute the goalie's estimated save probability from all of those starts and use maximum-likelihood estimation to estimate the prior parameters. If the goalie has started fewer than 10 games in the past year, I use all of his team's goalie starts to make sure I'm not overfitting, which essentially treats an unknown goalie as a plug-in goalie behind his team's defense. I'd like to improve this method of estimating priors, but I'll need a full season of goalie starts in order to evaluate any new methods. In particular, I'd like to better account for goalies with little to no recent NHL experience. My hope is to use a uniform prior for goalies with no starts in the past year, while for goalies with anywhere between 1 and 9 starts, I'd like to use just their most recent game as a prior.
+
+Additionally, I'd like to be able to actually create some decision rules based on the output from this model and then evaluate how effective they are. It's one thing to compute an estimated change in win probability by switching from one goalie to the other, but if I can't demonstrate that a switch could actually be used to gain standings points, then this model doesn't provide much value. However, in order to evaluate any decision rules, I'll need to know all *four* active goalies in each NHL game this season. I've discussed this before, but the NHL doesn't keep a record of goalies being listed as active in a game if they didn't play any minutes. My plan is to create a simple database that records the four active goalies in each NHL game this season (which I'll share with anyone who would like to use it), and then I'll use this information to evaluate my model more thoroughly at the end of the season.
+
+In the meantime, however, I'll keep my live goalie evaluation application running with the same model I've been using up to this point for anyone who wants to reference it. The app isn't running yet since the season hasn't started, but you can find it at the following link: <https://ianferer.shinyapps.io/live_goalie_evaluation/>. If you pick a live NHL game from the drop-down menu, a table will appear that displays the estimated changes in win probability for each team if they were to pull their current goalie for their backup after any goal scored or during any intermission. It's admittedly not a particularly refined app right now, but it should be functional when the season begins.
+
+If I have any other updates on this project or any other projects I may start working on during the season, you can find them either here or on social media.
